@@ -5,118 +5,116 @@ import requests
 from bs4 import BeautifulSoup
 import math
 import time
-import os  # 新增 os 用於檢查檔案
+import os
+import itertools
 
-# --- 1. 頁面與 CSS ---
+# ==========================================
+# 0. 頁面設定與 CSS (含字體調整)
+# ==========================================
 st.set_page_config(page_title="當沖戰略室 V8 (網路版)", page_icon="⚡", layout="wide")
 
-st.markdown("""
+# --- 側邊欄設定先載入，以取得字體變數 ---
+with st.sidebar:
+    st.header("⚙️ 設定")
+    
+    # 3. 字體大小調整
+    font_size = st.slider("字體大小 (表格)", min_value=12, max_value=24, value=16)
+    
+    hide_etf = st.checkbox("隱藏 ETF (00開頭)", value=True)
+    st.markdown("---")
+    limit_rows = st.number_input("顯示筆數", min_value=1, value=50)
+    st.caption("功能說明")
+    st.info("🗑️ **如何刪除股票？**\n\n勾選左側框框後按 `Delete` 鍵。")
+
+# --- 動態 CSS ---
+st.markdown(f"""
     <style>
-    .block-container { padding-top: 0.5rem; padding-bottom: 1rem; padding-left: 1rem; padding-right: 1rem; }
-    div[data-testid="stDataFrame"] { font-size: 14px; }
-    .hit-tag { background-color: #ffff00; color: black; padding: 2px 6px; border-radius: 4px; font-weight: bold; }
+    .block-container {{ padding-top: 0.5rem; padding-bottom: 1rem; }}
+    
+    /* 調整表格字體大小 */
+    div[data-testid="stDataFrame"] * {{ 
+        font-size: {font_size}px !important; 
+        font-family: 'Microsoft JhengHei', sans-serif !important;
+    }}
+    
+    /* 命中標籤樣式 */
+    .hit-tag {{ background-color: #ffff00; color: black; padding: 2px 6px; border-radius: 4px; font-weight: bold; }}
+    
+    /* 4. 修正輸入跳動問題: 強制表格容器穩定 */
+    div[data-testid="stDataFrame"] {{
+        min-height: 200px;
+    }}
     </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 0. 本地資料讀取 (新增功能)
+# 1. 資料庫與網路功能
 # ==========================================
+
 @st.cache_data
 def load_local_stock_names():
-    """
-    讀取本地 stock_names.csv 建立快速查詢表
-    CSV 格式假設為: 代號,名稱 (無標題)
-    """
+    """讀取本地 stock_names.csv"""
     code_map = {}
     name_map = {}
     if os.path.exists("stock_names.csv"):
         try:
-            # 讀取 CSV，指定欄位名稱
             df = pd.read_csv("stock_names.csv", header=None, names=["code", "name"], dtype=str)
             for _, row in df.iterrows():
                 c = str(row['code']).strip()
                 n = str(row['name']).strip()
                 code_map[c] = n
-                name_map[n] = c  # 建立 名稱->代號 的反向查表
+                name_map[n] = c
         except Exception as e:
-            print(f"Error loading CSV: {e}")
+            pass
     return code_map, name_map
-
-# ==========================================
-# 核心功能 A: 網路爬蟲 (自動抓名稱) - 已整合本地查詢
-# ==========================================
 
 @st.cache_data(ttl=86400)
 def get_stock_name_online(code):
-    """
-    輸入代號 (2330)，優先查本地 CSV，查不到再去 Yahoo 抓取中文名稱
-    """
     code = str(code).strip()
     if not code.isdigit(): return code
-    
-    # 1. 優先查本地 CSV
     code_map, _ = load_local_stock_names()
-    if code in code_map:
-        return code_map[code]
+    if code in code_map: return code_map[code]
     
     try:
-        # 嘗試上市
         url = f"https://tw.stock.yahoo.com/quote/{code}.TW"
         headers = {'User-Agent': 'Mozilla/5.0'}
         r = requests.get(url, headers=headers, timeout=2)
-        
         soup = BeautifulSoup(r.text, "html.parser")
-        if soup.title:
-            title_text = soup.title.string
-            if "(" in title_text and ")" in title_text:
-                name = title_text.split('(')[0].strip()
-                return name
+        if soup.title and "(" in soup.title.string:
+            return soup.title.string.split('(')[0].strip()
         
-        # 若上市找不到，嘗試上櫃
         url_two = f"https://tw.stock.yahoo.com/quote/{code}.TWO"
         r_two = requests.get(url_two, headers=headers, timeout=2)
         soup_two = BeautifulSoup(r_two.text, "html.parser")
-        if soup_two.title:
-            title_text = soup_two.title.string
-            if "(" in title_text:
-                return title_text.split('(')[0].strip()
-                
-        return code 
+        if soup_two.title and "(" in soup_two.title.string:
+            return soup_two.title.string.split('(')[0].strip()
+        return code
     except:
         return code
 
 @st.cache_data(ttl=86400)
 def search_code_online(query):
-    """
-    輸入中文 (元晶)，優先查本地 CSV，查不到再去 Yahoo 搜尋
-    """
     query = query.strip()
     if query.isdigit(): return query
-    
-    # 1. 優先查本地 CSV (精確搜尋)
     _, name_map = load_local_stock_names()
-    if query in name_map:
-        return name_map[query]
+    if query in name_map: return name_map[query]
     
     try:
         url = f"https://tw.stock.yahoo.com/h/kimosearch/search_list.html?keyword={query}"
         headers = {'User-Agent': 'Mozilla/5.0'}
         r = requests.get(url, headers=headers, timeout=2)
         soup = BeautifulSoup(r.text, "html.parser")
-        
         links = soup.find_all('a', href=True)
         for link in links:
-            href = link['href']
-            if "/quote/" in href and ".TW" in href:
-                parts = href.split("/quote/")[1].split(".")
-                if parts[0].isdigit():
-                    return parts[0]
+            if "/quote/" in link['href'] and ".TW" in link['href']:
+                parts = link['href'].split("/quote/")[1].split(".")
+                if parts[0].isdigit(): return parts[0]
     except:
         pass
     return None
 
 # ==========================================
-# 核心邏輯 B: 計算與抓取
+# 2. 核心計算邏輯
 # ==========================================
 
 def get_tick_size(price):
@@ -142,30 +140,27 @@ def fetch_stock_data_raw(code, name_hint=""):
     try:
         ticker = yf.Ticker(f"{code}.TW")
         hist = ticker.history(period="10d")
-        
         if hist.empty:
             ticker = yf.Ticker(f"{code}.TWO")
             hist = ticker.history(period="10d")
-        
         if hist.empty: return None
 
-        # 1. 數據提取
+        # 1. 基礎數據
         today = hist.iloc[-1]
         current_price = today['Close']
-        
-        # 2. 昨日狀態
         prev_day = hist.iloc[-2] if len(hist) >= 2 else today
-        prev_prev_close = hist.iloc[-3]['Close'] if len(hist) >= 3 else prev_day['Open']
-        p_limit_up, p_limit_down = calculate_limits(prev_prev_close)
         
+        # 昨日狀態
+        prev_prev_close = hist.iloc[-3]['Close'] if len(hist) >= 3 else prev_day['Open']
+        p_up, p_down = calculate_limits(prev_prev_close)
         yesterday_status = ""
-        if prev_day['Close'] >= p_limit_up: yesterday_status = "🔥昨漲停"
-        elif prev_day['Close'] <= p_limit_down: yesterday_status = "💚昨跌停"
+        if prev_day['Close'] >= p_up: yesterday_status = "🔥昨漲停"
+        elif prev_day['Close'] <= p_down: yesterday_status = "💚昨跌停"
 
-        # 3. 今日漲跌停
+        # 今日漲跌停
         limit_up, limit_down = calculate_limits(prev_day['Close'])
 
-        # 4. 戰略點位
+        # 2. 戰略點位收集
         points = []
         ma5 = hist['Close'].tail(5).mean()
         points.append({"val": ma5, "tag": "多" if current_price > ma5 else "空"})
@@ -177,53 +172,63 @@ def fetch_stock_data_raw(code, name_hint=""):
         if not past_5.empty:
             points.append({"val": past_5['High'].max(), "tag": "高"})
             points.append({"val": past_5['Low'].min(), "tag": ""})
-            
-        # 計算用的點位
-        calc_points = points.copy()
-        calc_points.append({"val": limit_up, "tag": "漲停"})
-        calc_points.append({"val": limit_down, "tag": "跌停"})
 
-        # 過濾與排序
-        display_points = []
-        seen = set()
+        # --- 2. 修正：戰略備註排序邏輯 ---
+        # 收集所有要顯示的點 (包含觸及的漲跌停)
+        display_candidates = []
+        
+        # 加入常規點位
         for p in points:
             v = float(f"{p['val']:.2f}")
             if limit_down <= v <= limit_up:
-                if v not in seen:
-                    display_points.append({"val": v, "tag": p['tag']})
-                    seen.add(v)
-        display_points.sort(key=lambda x: x['val'])
+                display_candidates.append({"val": v, "tag": p['tag']})
         
-        # --- 生成戰略備註字串 (修改處) ---
+        # 若今日有觸及漲跌停，將其作為點位加入 (允許些微誤差)
+        if today['High'] >= limit_up - 0.01:
+            display_candidates.append({"val": limit_up, "tag": "漲停"})
+        if today['Low'] <= limit_down + 0.01:
+            display_candidates.append({"val": limit_down, "tag": "跌停"})
+            
+        # 排序並去重 (優先保留重要標籤: 漲停/跌停 > 高/低)
+        display_candidates.sort(key=lambda x: x['val'])
+        
+        final_display_points = []
+        for val, group in itertools.groupby(display_candidates, key=lambda x: round(x['val'], 2)):
+            g_list = list(group)
+            tags = [x['tag'] for x in g_list]
+            
+            # 決定顯示標籤優先級
+            final_tag = ""
+            if "漲停" in tags: final_tag = "漲停"
+            elif "跌停" in tags: final_tag = "跌停"
+            elif "高" in tags: final_tag = "高"
+            elif "低" in tags: final_tag = "低"
+            elif "多" in tags: final_tag = "多"
+            elif "空" in tags: final_tag = "空"
+            else: final_tag = "" # 普通點位
+            
+            final_display_points.append({"val": val, "tag": final_tag})
+            
+        # 生成字串
         note_parts = []
         if yesterday_status: note_parts.append(yesterday_status)
         
-        # 檢查當日是否觸及漲跌停 (加入備註)
-        today_high = today['High']
-        today_low = today['Low']
-        
-        def fmt_val(v):
-            return f"{v:.0f}" if v.is_integer() else f"{v:.2f}"
-
-        # 允許些微浮點數誤差
-        if today_high >= limit_up - 0.01:
-            note_parts.append(f"漲停{fmt_val(limit_up)}")
-        
-        if today_low <= limit_down + 0.01:
-            note_parts.append(f"跌停{fmt_val(limit_down)}")
-
-        for p in display_points:
-            v_str = fmt_val(p['val'])
-            tag = p['tag']
-            if "高" in tag: item = f"高{v_str}"
-            elif tag: item = f"{v_str}{tag}"
+        for p in final_display_points:
+            v_str = f"{p['val']:.0f}" if p['val'].is_integer() else f"{p['val']:.2f}"
+            t = p['tag']
+            if "高" in t: item = f"高{v_str}"
+            elif t: item = f"{v_str}{t}"
             else: item = v_str
             note_parts.append(item)
-        
+            
         strategy_note = "-".join(note_parts)
         # -------------------------------
+
+        # 計算用的完整點位 (包含未觸及的漲跌停，用於獲利計算)
+        calc_points = points.copy()
+        calc_points.append({"val": limit_up, "tag": "漲停"})
+        calc_points.append({"val": limit_down, "tag": "跌停"})
         
-        # 準備計算用的完整點位
         full_calc_points = []
         seen_calc = set()
         for p in calc_points:
@@ -233,11 +238,7 @@ def fetch_stock_data_raw(code, name_hint=""):
                  seen_calc.add(v)
         full_calc_points.sort(key=lambda x: x['val'])
 
-        # 自動抓取名稱
-        final_name = name_hint
-        if not final_name:
-            final_name = get_stock_name_online(code)
-        
+        final_name = name_hint if name_hint else get_stock_name_online(code)
         pct_change = (current_price - prev_day['Close']) / prev_day['Close'] * 100
 
         return {
@@ -260,86 +261,60 @@ def fetch_stock_data_raw(code, name_hint=""):
         return None
 
 # ==========================================
-# 介面邏輯
+# 3. 介面與互動
 # ==========================================
-
-if 'stock_data' not in st.session_state:
-    st.session_state.stock_data = pd.DataFrame()
-
-# --- 側邊欄 ---
-with st.sidebar:
-    st.header("⚙️ 設定")
-    hide_etf = st.checkbox("隱藏 ETF (00開頭)", value=True)
-    
-    st.markdown("---")
-    st.caption("功能說明")
-    st.info("🗑️ **如何刪除股票？**\n\n在下方表格左側勾選該列，按下鍵盤 `Delete` 鍵，或點擊表格右上角的垃圾桶圖示。")
-    
-    limit_rows = st.number_input("顯示筆數", min_value=1, value=50)
 
 st.title("⚡ 當沖戰略室 V8 (網路版)")
 
-# --- 上方輸入區 ---
 col_search, col_file = st.columns([2, 1])
-
 with col_search:
-    search_query = st.text_input("🔍 快速查詢 (輸入中文名稱或代號，用逗號分隔)", placeholder="鴻海, 2603, 緯創")
-
+    search_query = st.text_input("🔍 快速查詢 (中文/代號)", placeholder="鴻海, 2603, 緯創")
 with col_file:
-    uploaded_file = st.file_uploader("📂 上傳選股清單 (Excel/CSV)", type=['xlsx', 'csv'])
+    uploaded_file = st.file_uploader("📂 上傳清單", type=['xlsx', 'csv'])
     selected_sheet = None
     if uploaded_file and not uploaded_file.name.endswith('.csv'):
         xl = pd.ExcelFile(uploaded_file)
         default_idx = 0
-        if "週轉率" in xl.sheet_names:
-            default_idx = xl.sheet_names.index("週轉率")
-        selected_sheet = st.selectbox("選擇工作表", xl.sheet_names, index=default_idx)
+        if "週轉率" in xl.sheet_names: default_idx = xl.sheet_names.index("週轉率")
+        selected_sheet = st.selectbox("工作表", xl.sheet_names, index=default_idx)
 
-# --- 按鈕執行 ---
+# --- 執行按鈕 ---
 if st.button("🚀 執行分析", type="primary"):
     targets = []
     
-    # 1. 處理搜尋
+    # 搜尋處理
     if search_query:
         inputs = [x.strip() for x in search_query.replace('，',',').split(',') if x.strip()]
         for inp in inputs:
-            if inp.isdigit(): 
-                targets.append((inp, ""))
+            if inp.isdigit(): targets.append((inp, ""))
             else:
-                # 中文轉代號 (優先查本地 CSV，其次爬蟲)
-                with st.spinner(f"正在搜尋「{inp}」..."):
+                with st.spinner(f"搜尋「{inp}」..."):
                     code = search_code_online(inp)
-                if code:
-                    targets.append((code, inp))
-                else:
-                    st.toast(f"找不到「{inp}」的代號。", icon="⚠️")
+                if code: targets.append((code, inp))
+                else: st.toast(f"找不到「{inp}」", icon="⚠️")
 
-    # 2. 處理選股清單
+    # 檔案處理
     if uploaded_file:
         try:
-            if uploaded_file.name.endswith('.csv'):
-                df_up = pd.read_csv(uploaded_file)
-            else:
-                df_up = pd.read_excel(uploaded_file, sheet_name=selected_sheet)
+            if uploaded_file.name.endswith('.csv'): df_up = pd.read_csv(uploaded_file)
+            else: df_up = pd.read_excel(uploaded_file, sheet_name=selected_sheet)
             
             c_col = next((c for c in df_up.columns if "代號" in c), None)
             n_col = next((c for c in df_up.columns if "名稱" in c), None)
-            
             if c_col:
                 for _, row in df_up.iterrows():
                     c = str(row[c_col]).split('.')[0]
                     n = str(row[n_col]) if n_col else ""
-                    if c.isdigit():
-                        targets.append((c, n))
+                    if c.isdigit(): targets.append((c, n))
         except Exception as e:
-            st.error(f"檔案讀取失敗: {e}")
+            st.error(f"讀取失敗: {e}")
 
-    # 3. 批次抓取
+    # 抓取資料
     results = []
     seen = set()
     bar = st.progress(0)
+    total = len(targets)
     
-    total_items = len(targets)
     for i, (code, name) in enumerate(targets):
         if code in seen: continue
         if hide_etf and code.startswith("00"): continue
@@ -348,30 +323,25 @@ if st.button("🚀 執行分析", type="primary"):
         if data:
             results.append(data)
             seen.add(code)
-        
-        if total_items > 0:
-            bar.progress((i+1)/total_items)
+        if total > 0: bar.progress((i+1)/total)
     
     bar.empty()
     
     if results:
         st.session_state.stock_data = pd.DataFrame(results)
     else:
-        st.warning("無資料。")
+        st.warning("無資料")
 
 # ==========================================
-# 顯示與編輯層
+# 4. 表格顯示與即時計算
 # ==========================================
 
 if not st.session_state.stock_data.empty:
     
-    df_display = st.session_state.stock_data.reset_index(drop=True)
+    # 應用顯示筆數
+    df_display = st.session_state.stock_data.head(limit_rows).reset_index(drop=True)
     
-    # --- 修復: 應用「顯示筆數」設定 ---
-    if limit_rows > 0:
-        df_display = df_display.head(limit_rows)
-    # -------------------------------
-    
+    # 4. 修正輸入跳動: 這裡不使用 key 變化，保持結構穩定
     edited_df = st.data_editor(
         df_display,
         column_config={
@@ -380,10 +350,11 @@ if not st.session_state.stock_data.empty:
             "收盤價": st.column_config.NumberColumn(format="%.2f", disabled=True),
             "自訂價(可修)": st.column_config.NumberColumn(
                 "自訂價 ✏️",
-                help="輸入後按 Enter 計算",
+                help="輸入價格計算",
                 format="%.2f",
                 step=0.1,
-                required=False
+                required=False,
+                width="medium" # 固定寬度減少跳動
             ),
             "漲跌幅": st.column_config.NumberColumn("漲跌%", format="%.2f%%", disabled=True),
             "漲停價": st.column_config.NumberColumn("🔥漲停", format="%.2f", disabled=True),
@@ -396,12 +367,12 @@ if not st.session_state.stock_data.empty:
         },
         column_order=["代號", "名稱", "收盤價", "自訂價(可修)", "漲跌幅", "漲停價", "跌停價", "獲利目標", "防守停損", "命中狀態", "戰略備註"],
         hide_index=True,
-        use_container_width=False,
+        use_container_width=True, # 使用全寬增加穩定性
         num_rows="dynamic",
-        key="main_editor" 
+        key="main_editor"
     )
     
-    # --- 即時運算 ---
+    # --- 計算邏輯 (更新版) ---
     updates = []
     
     for idx, row in edited_df.iterrows():
@@ -416,25 +387,29 @@ if not st.session_state.stock_data.empty:
         limit_up = row['_limit_up']
         limit_down = row['_limit_down']
         
-        # 獲利邏輯
+        # 1. 修正獲利目標邏輯
         target = None
         for p in points:
             if p['val'] > price:
                 target = p['val']
                 break
+        
+        # 若上方無壓力 (如創新高)，套用 +3%
         if target is None:
             target = price * 1.03
-            if target > limit_up: target = limit_up
+            # 這裡移除了 target > limit_up 的限制，讓使用者看到理論目標
         
-        # 防守邏輯
+        # 修正防守停損邏輯
         stop = None
         for p in reversed(points):
             if p['val'] < price:
                 stop = p['val']
                 break
+        
+        # 若下方無支撐 (如跌停破底)，套用 -3%
         if stop is None:
             stop = price * 0.97
-            if stop < limit_down: stop = limit_down
+            # 這裡移除了 stop < limit_down 的限制
         
         # 命中檢查
         hit_msg = ""
@@ -450,7 +425,7 @@ if not st.session_state.stock_data.empty:
             "命中狀態": hit_msg
         })
     
-    # 更新顯示
+    # 寫回結果
     df_updates = pd.DataFrame(updates, index=edited_df.index)
     edited_df.update(df_updates)
     st.session_state.stock_data = edited_df
@@ -466,12 +441,10 @@ if not st.session_state.stock_data.empty:
         return ['background-color: #ffffcc; color: black' if '⚡' in str(s['命中狀態']) else '' for _ in s]
 
     st.markdown("### 🎯 計算結果")
-    
     mask = edited_df['自訂價(可修)'].notna()
     
     if mask.any():
         res_df = edited_df[mask][["代號", "名稱", "自訂價(可修)", "漲跌幅", "獲利目標", "防守停損", "命中狀態", "戰略備註"]]
-        
         st.dataframe(
             res_df.style.applymap(color_change, subset=['漲跌幅']).apply(highlight_hit, axis=1),
             use_container_width=True,
@@ -484,7 +457,7 @@ if not st.session_state.stock_data.empty:
             }
         )
     else:
-        st.info("請在上方表格輸入「自訂價」以查看計算結果。若有無法當沖的股票，請選取該行並刪除 (Delete)。")
+        st.info("請在上方表格輸入「自訂價」以查看計算結果。")
 
 elif not uploaded_file and not search_query:
     st.info("請輸入代號/中文名稱或上傳檔案。")
