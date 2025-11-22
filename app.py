@@ -147,13 +147,28 @@ def get_tick_size(price):
     return 5.0
 
 def calculate_limits(price):
-    """計算漲跌停價 (10%)"""
+    """
+    計算漲跌停價 (10%)
+    修正：需使用「目標價格」的 Tick 進行捨去/進位，而非參考價的 Tick
+    """
     try:
         p = float(price)
-        tick = get_tick_size(p)
-        limit_up = math.floor((p * 1.10) / tick) * tick
-        limit_down = math.ceil((p * 0.90) / tick) * tick
-        return limit_up, limit_down
+        
+        # 1. 計算原始目標價
+        raw_up = p * 1.10
+        raw_down = p * 0.90
+        
+        # 2. 漲停價：找到目標價對應的 Tick，並無條件捨去 (Floor)
+        # 加上微小 epsilon 避免浮點數運算誤差 (例如 100*1.1=110.0000001)
+        tick_up = get_tick_size(raw_up)
+        limit_up = math.floor(raw_up / tick_up + 0.00001) * tick_up
+        
+        # 3. 跌停價：找到目標價對應的 Tick，並無條件進位 (Ceil)
+        tick_down = get_tick_size(raw_down)
+        limit_down = math.ceil(raw_down / tick_down - 0.00001) * tick_down
+        
+        # 修正浮點數顯示問題
+        return float(f"{limit_up:.2f}"), float(f"{limit_down:.2f}")
     except:
         return 0, 0
 
@@ -183,17 +198,17 @@ def fetch_stock_data_raw(code, name_hint=""):
         current_price = today['Close']
         prev_day = hist.iloc[-2] if len(hist) >= 2 else today
         
-        # 獲利目標與防守停損 (靜態計算)
+        # 獲利目標與防守停損 (靜態計算：收盤價 +/- 3% 並套用Tick)
         target_price = apply_tick_rules(current_price * 1.03)
         stop_price = apply_tick_rules(current_price * 0.97)
         
+        # 漲跌停計算 (以昨日收盤價為基準)
         limit_up, limit_down = calculate_limits(prev_day['Close'])
 
         # 2. 壓力支撐點位收集
-        # 關鍵更新：所有數值都經過 apply_tick_rules 處理，確保戰略備註符合台股規則
         points = []
         
-        # MA5 (最容易出現小數位數問題，需修正)
+        # MA5
         ma5 = apply_tick_rules(hist['Close'].tail(5).mean())
         points.append({"val": ma5, "tag": "多" if current_price > ma5 else "空"})
         
@@ -269,7 +284,7 @@ def fetch_stock_data_raw(code, name_hint=""):
         
         strategy_note = "-".join(note_parts)
 
-        # 計算用的完整點位 (用於命中檢查)
+        # 計算用的完整點位
         calc_points = points.copy()
         calc_points.append({"val": limit_up, "tag": "漲停"})
         calc_points.append({"val": limit_down, "tag": "跌停"})
@@ -404,7 +419,7 @@ if not st.session_state.stock_data.empty:
         key="main_editor"
     )
     
-    # 2. 結果計算
+    # 2. 結果計算 (只做命中檢查)
     results = []
     for idx, row in edited_df.iterrows():
         custom_price = row['自訂價(可修)']
@@ -414,7 +429,7 @@ if not st.session_state.stock_data.empty:
             price = float(custom_price)
             points = row['_points']
             
-            # 命中判斷
+            # 命中判斷 (誤差0.01內)
             for p in points:
                 if abs(p['val'] - price) < 0.01:
                     is_hit = True
