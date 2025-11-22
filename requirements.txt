@@ -4,3 +4,4 @@ yfinance
 requests
 plotly
 openpyxl
+numpy
