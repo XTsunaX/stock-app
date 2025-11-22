@@ -13,7 +13,7 @@ import itertools
 # ==========================================
 st.set_page_config(page_title="當沖戰略室 V8 (網路版)", page_icon="⚡", layout="wide")
 
-# --- 初始化 Session State ---
+# --- 初始化 Session State (防止錯誤) ---
 if 'stock_data' not in st.session_state:
     st.session_state.stock_data = pd.DataFrame()
 
@@ -21,8 +21,8 @@ if 'stock_data' not in st.session_state:
 with st.sidebar:
     st.header("⚙️ 設定")
     
-    # 3. 字體調整範圍加大 (修正處)
-    font_size = st.slider("字體大小 (表格)", min_value=12, max_value=32, value=18)
+    # 字體大小調整 (範圍加大到 72)
+    font_size = st.slider("字體大小 (表格)", min_value=12, max_value=72, value=18)
     
     hide_etf = st.checkbox("隱藏 ETF (00開頭)", value=True)
     st.markdown("---")
@@ -30,7 +30,7 @@ with st.sidebar:
     st.caption("功能說明")
     st.info("🗑️ **如何刪除股票？**\n\n勾選左側框框後按 `Delete` 鍵。")
 
-# --- 動態 CSS ---
+# --- 動態 CSS (優化輸入穩定性) ---
 st.markdown(f"""
     <style>
     .block-container {{ padding-top: 0.5rem; padding-bottom: 1rem; }}
@@ -39,14 +39,16 @@ st.markdown(f"""
     div[data-testid="stDataFrame"] * {{ 
         font-size: {font_size}px !important; 
         font-family: 'Microsoft JhengHei', sans-serif !important;
+        line-height: 1.5 !important;
     }}
     
     /* 命中標籤樣式 */
     .hit-tag {{ background-color: #ffff00; color: black; padding: 2px 6px; border-radius: 4px; font-weight: bold; }}
     
-    /* 修正輸入跳動問題: 強制表格容器穩定 */
+    /* 修正輸入跳動問題: 增加表格容器高度與穩定性 */
     div[data-testid="stDataFrame"] {{
-        min-height: 200px;
+        min-height: 500px; 
+        width: 100%;
     }}
     </style>
 """, unsafe_allow_html=True)
@@ -170,44 +172,71 @@ def fetch_stock_data_raw(code, name_hint=""):
             points.append({"val": past_5['High'].max(), "tag": "高"})
             points.append({"val": past_5['Low'].min(), "tag": ""})
 
-        # --- 戰略備註排序邏輯 ---
+        # --- 戰略備註排序與標籤邏輯 (更新版) ---
         display_candidates = []
+        
+        # 先加入一般點位
         for p in points:
             v = float(f"{p['val']:.2f}")
             if limit_down <= v <= limit_up:
                 display_candidates.append({"val": v, "tag": p['tag']})
         
-        if today['High'] >= limit_up - 0.01:
+        # 檢查是否觸及漲跌停，若有則加入 (允許 0.01 誤差)
+        touched_up = today['High'] >= limit_up - 0.01
+        touched_down = today['Low'] <= limit_down + 0.01
+        
+        if touched_up:
             display_candidates.append({"val": limit_up, "tag": "漲停"})
-        if today['Low'] <= limit_down + 0.01:
+        if touched_down:
             display_candidates.append({"val": limit_down, "tag": "跌停"})
             
         display_candidates.sort(key=lambda x: x['val'])
         
+        # 整合重複數值並決定最終標籤
         final_display_points = []
         for val, group in itertools.groupby(display_candidates, key=lambda x: round(x['val'], 2)):
             g_list = list(group)
             tags = [x['tag'] for x in g_list]
-            first_tag = ""
-            if "漲停" in tags: first_tag = "漲停"
-            elif "跌停" in tags: first_tag = "跌停"
-            elif "高" in tags: first_tag = "高"
-            elif "低" in tags: first_tag = "低"
-            elif "多" in tags: first_tag = "多"
-            elif "空" in tags: first_tag = "空"
-            else: first_tag = ""
-            final_display_points.append({"val": val, "tag": first_tag})
+            
+            # 判斷是否結合 "高/低" 與 "漲停/跌停"
+            final_tag = ""
+            
+            is_limit_up = "漲停" in tags
+            is_limit_down = "跌停" in tags
+            is_high = "高" in tags
+            is_low = "低" in tags
+            
+            if is_limit_up:
+                final_tag = "漲停高" if is_high else "漲停"
+            elif is_limit_down:
+                final_tag = "跌停低" if is_low else "跌停"
+            else:
+                # 一般優先級
+                if "高" in tags: final_tag = "高"
+                elif "低" in tags: final_tag = "低"
+                elif "多" in tags: final_tag = "多"
+                elif "空" in tags: final_tag = "空"
+                else: final_tag = ""
+
+            final_display_points.append({"val": val, "tag": final_tag})
             
         note_parts = []
-        # 2. 移除昨日漲跌停標註 (修正處: 這裡不再 append yesterday_status)
-        
+        # 移除昨日狀態，直接顯示點位
         for p in final_display_points:
             v_str = f"{p['val']:.0f}" if p['val'].is_integer() else f"{p['val']:.2f}"
             t = p['tag']
-            if "高" in t: item = f"高{v_str}"
-            elif t: item = f"{v_str}{t}"
-            else: item = v_str
+            
+            # 根據新邏輯格式化字串
+            if t in ["漲停", "漲停高", "跌停", "跌停低"]:
+                item = f"{t}{v_str}" # 例如: 漲停100, 漲停高100
+            elif "高" in t and t != "漲停高": # 普通的高
+                item = f"高{v_str}"
+            elif t: 
+                item = f"{v_str}{t}"
+            else: 
+                item = v_str
             note_parts.append(item)
+        
         strategy_note = "-".join(note_parts)
 
         # 計算用的完整點位
@@ -326,8 +355,7 @@ if not st.session_state.stock_data.empty:
     
     df_display = st.session_state.stock_data.head(limit_rows).reset_index(drop=True)
     
-    # 1. 修正輸入跳動: 移除了計算欄位(獲利/停損/命中)的顯示，專注於輸入
-    # 這確保了表格結構在重新渲染時保持穩定，不會因為計算值的變更導致焦點丟失
+    # 這裡將 height 設為 None 來使用動態高度，但在 CSS 中有 min-height 支撐
     edited_df = st.data_editor(
         df_display,
         column_config={
@@ -340,17 +368,18 @@ if not st.session_state.stock_data.empty:
                 format="%.2f",
                 step=0.1,
                 required=False,
-                width="medium"
+                width="medium" 
             ),
             "漲跌幅": st.column_config.NumberColumn("漲跌%", format="%.2f%%", disabled=True),
             "漲停價": st.column_config.NumberColumn("🔥漲停", format="%.2f", disabled=True),
             "跌停價": st.column_config.NumberColumn("💚跌停", format="%.2f", disabled=True),
+            "獲利目標": st.column_config.NumberColumn(format="%.2f", disabled=True),
+            "防守停損": st.column_config.NumberColumn(format="%.2f", disabled=True),
             "戰略備註": st.column_config.TextColumn(width="large", disabled=True),
-            # 隱藏計算欄位，改於下方結果表格顯示
-            "獲利目標": None, "防守停損": None, "命中狀態": None,
+            "命中狀態": st.column_config.TextColumn(width="small", disabled=True),
             "_points": None, "_limit_up": None, "_limit_down": None
         },
-        column_order=["代號", "名稱", "收盤價", "自訂價(可修)", "漲跌幅", "漲停價", "跌停價", "戰略備註"],
+        column_order=["代號", "名稱", "收盤價", "自訂價(可修)", "漲跌幅", "漲停價", "跌停價", "獲利目標", "防守停損", "命中狀態", "戰略備註"],
         hide_index=True,
         use_container_width=True,
         num_rows="dynamic",
@@ -358,17 +387,13 @@ if not st.session_state.stock_data.empty:
     )
     
     # --- 計算邏輯 ---
-    # 這裡只做計算，用於顯示下方的結果表格
-    results = []
+    updates = []
     
     for idx, row in edited_df.iterrows():
         custom_price = row['自訂價(可修)']
         
-        # 保存用戶輸入的價格到 session state (這樣切換頁面或輸入時數值才會保留)
-        st.session_state.stock_data.loc[idx, '自訂價(可修)'] = custom_price
-
         if pd.isna(custom_price) or custom_price == "":
-            results.append({"獲利目標": None, "防守停損": None, "命中狀態": ""})
+            updates.append({"獲利目標": None, "防守停損": None, "命中狀態": ""})
             continue
             
         price = float(custom_price)
@@ -400,20 +425,17 @@ if not st.session_state.stock_data.empty:
                 hit_msg = f"⚡{p['val']}({t})"
                 break
         
-        results.append({
+        updates.append({
             "獲利目標": target,
             "防守停損": stop,
             "命中狀態": hit_msg
         })
     
-    # 結合原始數據與計算結果
-    res_df = edited_df.copy()
-    calc_df = pd.DataFrame(results, index=edited_df.index)
-    
-    # 將計算結果合併進去 (只為了下方顯示用)
-    final_res_df = pd.concat([res_df, calc_df], axis=1)
+    df_updates = pd.DataFrame(updates, index=edited_df.index)
+    edited_df.update(df_updates)
+    st.session_state.stock_data = edited_df
 
-    # --- 結果顯示 (集中在下方表格) ---
+    # --- 結果顯示 ---
     def color_change(val):
         if isinstance(val, (float, int)):
             if val > 0: return 'color: #ff4b4b'
@@ -424,12 +446,12 @@ if not st.session_state.stock_data.empty:
         return ['background-color: #ffffcc; color: black' if '⚡' in str(s['命中狀態']) else '' for _ in s]
 
     st.markdown("### 🎯 計算結果")
-    mask = final_res_df['自訂價(可修)'].notna()
+    mask = edited_df['自訂價(可修)'].notna()
     
     if mask.any():
-        display_res = final_res_df[mask][["代號", "名稱", "自訂價(可修)", "漲跌幅", "獲利目標", "防守停損", "命中狀態", "戰略備註"]]
+        res_df = edited_df[mask][["代號", "名稱", "自訂價(可修)", "漲跌幅", "獲利目標", "防守停損", "命中狀態", "戰略備註"]]
         st.dataframe(
-            display_res.style.applymap(color_change, subset=['漲跌幅']).apply(highlight_hit, axis=1),
+            res_df.style.applymap(color_change, subset=['漲跌幅']).apply(highlight_hit, axis=1),
             use_container_width=True,
             hide_index=True,
             column_config={
