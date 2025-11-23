@@ -14,7 +14,7 @@ import json
 # ==========================================
 st.set_page_config(page_title="當沖戰略室", page_icon="⚡", layout="wide")
 
-# 1. 標題位置 (CSS padding-top 會將其往下推，避免被遮擋)
+# 1. 標題位置
 st.title("⚡ 當沖戰略室 ⚡")
 
 CONFIG_FILE = "config.json"
@@ -90,7 +90,6 @@ font_px = f"{st.session_state.font_size}px"
 
 st.markdown(f"""
     <style>
-    /* 2. 修正標題被遮擋：增加上方內距 padding-top */
     .block-container {{ padding-top: 3.5rem; padding-bottom: 1rem; }}
     
     /* 套用到所有 Streamlit 表格相關元素 */
@@ -272,7 +271,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         for p in points:
             v = float(f"{p['val']:.2f}")
             
-            # 備註過濾邏輯：確保顯示的點位不超過收盤價的 +/- 10% (limit_up_col)
+            # 備註過濾邏輯
             is_in_range = limit_down_col <= v <= limit_up_col
             is_5ma = "多" in p['tag'] or "空" in p['tag']
             
@@ -285,6 +284,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
 
         if touched_up:
             display_candidates.append({"val": limit_up_today, "tag": "漲停"})
+        
         if touched_down:
             display_candidates.append({"val": limit_down_today, "tag": "跌停"})
             
@@ -353,13 +353,14 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         strategy_note = "-".join(note_parts)
         final_name = name_hint if name_hint else get_stock_name_online(code)
         
+        # 2. 修正：回傳的 Key 必須與 input_cols 一致
         return {
             "代號": code,
             "名稱": final_name,
             "收盤價": round(current_price, 2),
             "漲跌幅": pct_change, 
-            "當日漲停價": limit_up_col,   
-            "當日跌停價": limit_down_col,
+            "當日漲停價": limit_up_col,   # 統一 key
+            "當日跌停價": limit_down_col, # 統一 key
             "自訂價(可修)": None, 
             "獲利目標": target_price, 
             "防守停損": stop_price,   
@@ -460,8 +461,13 @@ with tab1:
             st.session_state.stock_data = pd.DataFrame(results)
 
     if not st.session_state.stock_data.empty:
+        
         limit = st.session_state.limit_rows
         df_all = st.session_state.stock_data
+        
+        # 自動修正舊資料 Key 名稱，防止 TypeError
+        rename_map = {"漲停價": "當日漲停價", "跌停價": "當日跌停價"}
+        df_all = df_all.rename(columns=rename_map)
         
         if '_source' in df_all.columns:
             df_up = df_all[df_all['_source'] == 'upload'].head(limit)
@@ -470,6 +476,7 @@ with tab1:
         else:
             df_display = df_all.head(limit).reset_index(drop=True)
         
+        # 3. 欄位排序更新
         input_cols = ["代號", "名稱", "收盤價", "漲跌幅", "戰略備註", "自訂價(可修)", "當日漲停價", "當日跌停價", "獲利目標", "防守停損", "_points"]
         
         for col in input_cols:
@@ -512,13 +519,14 @@ with tab1:
             if not (pd.isna(custom_price) or custom_price == ""):
                 price = float(custom_price)
                 points = row['_points']
-                # 使用 at 存取，因為 reset_index 後 index 是連續整數
+                
+                # 3. 防止 TypeError: 檢查值是否存在
                 limit_up = df_display.at[idx, '當日漲停價']
                 limit_down = df_display.at[idx, '當日跌停價']
                 
-                if abs(price - limit_up) < 0.01:
+                if pd.notna(limit_up) and abs(price - limit_up) < 0.01:
                     hit_type = 'up' 
-                elif abs(price - limit_down) < 0.01:
+                elif pd.notna(limit_down) and abs(price - limit_down) < 0.01:
                     hit_type = 'down'
                 else:
                     for p in points:
