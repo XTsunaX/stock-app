@@ -1,5 +1,3 @@
-更新:
-還是沒修復，運用這版代碼吧。
 import streamlit as st
 import pandas as pd
 import yfinance as yf
