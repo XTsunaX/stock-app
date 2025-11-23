@@ -14,7 +14,7 @@ import json
 # ==========================================
 st.set_page_config(page_title="當沖戰略室", page_icon="⚡", layout="wide")
 
-# 1. 確保標題在最上方顯示
+# 1. 標題位置 (CSS padding-top 會將其往下推，避免被遮擋)
 st.title("⚡ 當沖戰略室 ⚡")
 
 CONFIG_FILE = "config.json"
@@ -90,7 +90,8 @@ font_px = f"{st.session_state.font_size}px"
 
 st.markdown(f"""
     <style>
-    .block-container {{ padding-top: 0.5rem; padding-bottom: 1rem; }}
+    /* 2. 修正標題被遮擋：增加上方內距 padding-top */
+    .block-container {{ padding-top: 3.5rem; padding-bottom: 1rem; }}
     
     /* 套用到所有 Streamlit 表格相關元素 */
     div[data-testid="stDataFrame"] table,
@@ -469,7 +470,6 @@ with tab1:
         else:
             df_display = df_all.head(limit).reset_index(drop=True)
         
-        # 3. 欄位排序更新
         input_cols = ["代號", "名稱", "收盤價", "漲跌幅", "戰略備註", "自訂價(可修)", "當日漲停價", "當日跌停價", "獲利目標", "防守停損", "_points"]
         
         for col in input_cols:
@@ -498,7 +498,7 @@ with tab1:
                 "戰略備註": st.column_config.TextColumn(width="large", disabled=True),
                 "_points": None 
             },
-            hide_index=True, # 隱藏索引
+            hide_index=True, 
             use_container_width=True,
             num_rows="dynamic",
             key="main_editor"
@@ -512,6 +512,7 @@ with tab1:
             if not (pd.isna(custom_price) or custom_price == ""):
                 price = float(custom_price)
                 points = row['_points']
+                # 使用 at 存取，因為 reset_index 後 index 是連續整數
                 limit_up = df_display.at[idx, '當日漲停價']
                 limit_down = df_display.at[idx, '當日跌停價']
                 
