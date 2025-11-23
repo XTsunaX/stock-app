@@ -47,6 +47,10 @@ if 'stock_data' not in st.session_state:
 if 'calc_base_price' not in st.session_state:
     st.session_state.calc_base_price = 100.0
 
+# [修正] 補上 calc_view_price 的初始化，防止 AttributeError
+if 'calc_view_price' not in st.session_state:
+    st.session_state.calc_view_price = 100.0
+
 # 優先從設定檔讀取
 saved_config = load_config()
 
@@ -254,7 +258,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             ticker = yf.Ticker(f"{code}.TWO")
             hist = ticker.history(period="3mo")
         if hist.empty: 
-            # st.error(f"⚠️ 代號 {code}: 抓取無資料 (Yahoo Finance 返回空值)。")
+            st.error(f"⚠️ 代號 {code}: 抓取無資料 (Yahoo Finance 返回空值)。")
             return None
 
         today = hist.iloc[-1]
@@ -459,12 +463,11 @@ with tab1:
         if uploaded_file:
             try:
                 if uploaded_file.name.endswith('.csv'): 
-                    # 已在上面讀取
+                    # 已在上面讀取 df_up
                     pass
                 else: 
                     if 'xl' in locals() and xl:
-                        # 移除 dtype=str 以免引擎錯誤，改後處理
-                        df_up = pd.read_excel(uploaded_file, sheet_name=selected_sheet)
+                        df_up = pd.read_excel(uploaded_file, sheet_name=selected_sheet, dtype=str)
                     else:
                         df_up = pd.DataFrame()
                 
@@ -474,12 +477,11 @@ with tab1:
                     
                     if c_col:
                         for _, row in df_up.iterrows():
-                            # 先轉字串，去小數點，再補零
                             c_raw = str(row[c_col])
                             c = c_raw.split('.')[0].strip()
                             
                             if c.isdigit():
-                                if len(c) <= 3: c = "00" + c # 修正 ETF
+                                if len(c) <= 3: c = "00" + c 
                                 n = str(row[n_col]) if n_col else ""
                                 targets.append((c, n, 'upload', {}))
             except Exception as e:
@@ -576,7 +578,6 @@ with tab1:
                 try:
                     price = float(custom_price)
                     points = row['_points']
-                    
                     limit_up = df_display.at[idx, '當日漲停價']
                     limit_down = df_display.at[idx, '當日跌停價']
                     
@@ -634,7 +635,6 @@ with tab1:
 with tab2:
     st.markdown("#### 💰 當沖損益試算 💰")
     
-    # 這裡加入 columns(5) 以放置新的 "顯示檔數" 選項
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
         calc_price = st.number_input(
@@ -654,20 +654,19 @@ with tab2:
         discount = st.number_input("手續費折扣 (折)", value=2.8, step=0.1, min_value=0.1, max_value=10.0)
     with c4:
         min_fee = st.number_input("最低手續費 (元)", value=20, step=1)
-    
-    # 新增：顯示檔數設定
+        
     with c5:
         tick_count = st.number_input("顯示檔數 (檔)", value=5, min_value=1, max_value=50, step=1)
         
     direction = st.radio("交易方向", ["當沖多 (先買後賣)", "當沖空 (先賣後買)"], horizontal=True)
     
-    # 計算漲跌停
     limit_up, limit_down = calculate_limits(st.session_state.calc_base_price)
     
     b1, b2, _ = st.columns([1, 1, 6])
     with b1:
         if st.button("🔼 向上", use_container_width=True):
-            # 移動步數 = 顯示檔數 (或保持 5，這裡改為 tick_count 讓翻頁更順)
+            if 'calc_view_price' not in st.session_state: st.session_state.calc_view_price = st.session_state.calc_base_price
+            
             st.session_state.calc_view_price = move_tick(st.session_state.calc_view_price, tick_count)
             if st.session_state.calc_view_price > limit_up:
                 st.session_state.calc_view_price = limit_up
@@ -675,16 +674,20 @@ with tab2:
             
     with b2:
         if st.button("🔽 向下", use_container_width=True):
+            if 'calc_view_price' not in st.session_state: st.session_state.calc_view_price = st.session_state.calc_base_price
+            
             st.session_state.calc_view_price = move_tick(st.session_state.calc_view_price, -tick_count)
             if st.session_state.calc_view_price < limit_down:
                 st.session_state.calc_view_price = limit_down
             st.rerun()
             
-    # 使用使用者設定的 tick_count 來決定範圍
     ticks_range = range(tick_count, -(tick_count + 1), -1)
     calc_data = []
     
     base_p = st.session_state.calc_base_price
+    
+    if 'calc_view_price' not in st.session_state:
+        st.session_state.calc_view_price = base_p
     view_p = st.session_state.calc_view_price
     
     is_long = "多" in direction
@@ -700,24 +703,19 @@ with tab2:
         if is_long:
             buy_price = base_p
             sell_price = p
-            
             buy_fee = max(min_fee, math.floor(buy_price * shares * fee_rate * (discount/10)))
             sell_fee = max(min_fee, math.floor(sell_price * shares * fee_rate * (discount/10)))
             tax = math.floor(sell_price * shares * tax_rate)
-            
             cost = (buy_price * shares) + buy_fee
             income = (sell_price * shares) - sell_fee - tax
             profit = income - cost
             total_fee = buy_fee + sell_fee
-            
         else: 
             sell_price = base_p
             buy_price = p
-            
             sell_fee = max(min_fee, math.floor(sell_price * shares * fee_rate * (discount/10)))
             buy_fee = max(min_fee, math.floor(buy_price * shares * fee_rate * (discount/10)))
             tax = math.floor(sell_price * shares * tax_rate)
-            
             income = (sell_price * shares) - sell_fee - tax
             cost = (buy_price * shares) + buy_fee
             profit = income - cost
