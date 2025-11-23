@@ -274,11 +274,12 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
 
         pct_change = ((current_price - prev_day['Close']) / prev_day['Close']) * 100
         
-        # 1. 獲利/停損：以收盤價為基準
+        # 1. 欄位顯示用的數據 (以收盤價為基準 -> 預測下一日)
         target_price = apply_tick_rules(current_price * 1.03)
         stop_price = apply_tick_rules(current_price * 0.97)
-        
-        # 2. 漲跌停價：以【昨日收盤】為基準 (修正處)
+        limit_up_col, limit_down_col = calculate_limits(current_price) 
+
+        # 2. 戰略備註用的漲跌停參考 (以昨日收盤為基準 -> 今日限制)
         limit_up_today, limit_down_today = calculate_limits(prev_day['Close'])
 
         # 點位收集
@@ -303,17 +304,17 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         points.append({"val": high_90, "tag": "高"})
         points.append({"val": low_90, "tag": "低"})
 
-        # 戰略備註整理 (過濾)
+        # 戰略備註整理
         display_candidates = []
         for p in points:
             v = float(f"{p['val']:.2f}")
-            # 備註過濾邏輯：只顯示在今日漲跌停範圍內的點位 (使用 limit_up_today)
-            is_in_range = limit_down_today <= v <= limit_up_today
+            # 備註過濾邏輯：確保顯示的點位不超過 [收盤價預測的漲跌停] 範圍
+            is_in_range = limit_down_col <= v <= limit_up_col
             is_5ma = "多" in p['tag'] or "空" in p['tag']
             if is_in_range or is_5ma:
                 display_candidates.append({"val": v, "tag": p['tag']})
         
-        # 檢查是否觸及今日漲跌停
+        # 檢查是否觸及今日漲跌停 (基於昨日收盤價)
         touched_up = today['High'] >= limit_up_today - 0.01
         touched_down = today['Low'] <= limit_down_today + 0.01
 
@@ -370,18 +371,9 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             
         note_parts = []
         seen_vals = set() 
-        
-        # 3. 同步 _points 與戰略備註的內容
-        # 這樣才能確保「未顯示在備註的點」不會觸發亮燈
-        valid_points_for_hit = [] 
-
         for p in final_display_points:
             if p['val'] in seen_vals and p['tag'] == "": continue
             seen_vals.add(p['val'])
-            
-            # 收集有效的點位供 _points 使用
-            valid_points_for_hit.append(p)
-
             v_str = f"{p['val']:.0f}" if p['val'].is_integer() else f"{p['val']:.2f}"
             t = p['tag']
             if t in ["漲停", "漲停高", "跌停", "跌停低", "高", "低"]:
@@ -393,6 +385,24 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             note_parts.append(item)
         
         strategy_note = "-".join(note_parts)
+        
+        # 3. 準備用於命中比對的點位 (包含今日漲跌停，用於紅綠色判斷)
+        # 注意：這裡加入的是 limit_up_today (今日漲停)，非 column 顯示的明日漲停
+        calc_points = points.copy()
+        calc_points.append({"val": limit_up_today, "tag": "漲停"})
+        calc_points.append({"val": limit_down_today, "tag": "跌停"})
+        for ep in extra_points:
+            calc_points.append(ep)
+        
+        full_calc_points = []
+        seen_calc = set()
+        for p in calc_points:
+             v = float(f"{p['val']:.2f}")
+             if v not in seen_calc:
+                 full_calc_points.append({"val": v, "tag": p['tag']})
+                 seen_calc.add(v)
+        full_calc_points.sort(key=lambda x: x['val'])
+
         final_name = name_hint if name_hint else get_stock_name_online(code)
         
         return {
@@ -400,13 +410,13 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             "名稱": final_name,
             "收盤價": round(current_price, 2),
             "漲跌幅": pct_change, 
-            "當日漲停價": limit_up_today,   # 改回使用 limit_up_today (昨日基準)
-            "當日跌停價": limit_down_today, # 改回使用 limit_down_today (昨日基準)
+            "當日漲停價": limit_up_col,   
+            "當日跌停價": limit_down_col,
             "自訂價(可修)": None, 
             "獲利目標": target_price, 
             "防守停損": stop_price,   
             "戰略備註": strategy_note,
-            "_points": valid_points_for_hit # 只回傳顯示在備註中的點
+            "_points": full_calc_points
         }
     except Exception as e:
         st.error(f"⚠️ 代號 {code} 發生錯誤: {e}")
@@ -459,8 +469,7 @@ with tab1:
                     pass
                 else: 
                     if 'xl' in locals() and xl:
-                        # 移除 dtype=str 以免引擎錯誤，改後處理
-                        df_up = pd.read_excel(uploaded_file, sheet_name=selected_sheet)
+                        df_up = pd.read_excel(uploaded_file, sheet_name=selected_sheet, dtype=str)
                     else:
                         df_up = pd.DataFrame()
                 
@@ -470,7 +479,6 @@ with tab1:
                     
                     if c_col:
                         for _, row in df_up.iterrows():
-                            # 先轉字串，去小數點，再補零
                             c_raw = str(row[c_col])
                             c = c_raw.split('.')[0].strip()
                             
@@ -574,19 +582,20 @@ with tab1:
                     price = float(custom_price)
                     points = row['_points']
                     
-                    limit_up = df_display.at[idx, '當日漲停價']
-                    limit_down = df_display.at[idx, '當日跌停價']
+                    # 關鍵修正：從 _points 中判斷紅綠燈，而非看當日漲跌停欄位
+                    # 因為當日漲跌停欄位是「明天」的，但紅綠燈應反映「今天」的狀態
+                    # _points 裡面包含了 limit_up_today (Tag="漲停") 和 limit_down_today (Tag="跌停")
                     
-                    if pd.notna(limit_up) and abs(price - limit_up) < 0.01:
-                        hit_type = 'up' 
-                    elif pd.notna(limit_down) and abs(price - limit_down) < 0.01:
-                        hit_type = 'down'
-                    else:
-                        if isinstance(points, list):
-                            for p in points:
-                                if abs(p['val'] - price) < 0.01:
+                    if isinstance(points, list):
+                        for p in points:
+                            if abs(p['val'] - price) < 0.01:
+                                if "漲停" in p['tag']:
+                                    hit_type = 'up'
+                                elif "跌停" in p['tag']:
+                                    hit_type = 'down'
+                                else:
                                     hit_type = 'normal'
-                                    break
+                                break
                 except:
                     pass
                             
