@@ -47,6 +47,7 @@ if 'stock_data' not in st.session_state:
 if 'calc_base_price' not in st.session_state:
     st.session_state.calc_base_price = 100.0
 
+# [修正] 補上 calc_view_price 的初始化
 if 'calc_view_price' not in st.session_state:
     st.session_state.calc_view_price = 100.0
 
@@ -385,16 +386,23 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         
         strategy_note = "-".join(note_parts)
         
-        # 關鍵修正: _points 只使用 final_display_points
-        # 這樣隱藏的點位 (被過濾掉的) 就不會出現在 _points 中，不會觸發亮燈
-        
+        # 決定燈號
+        light = "⚪"
+        if "多" in strategy_note:
+            light = "🔴"
+        elif "空" in strategy_note:
+            light = "🟢"
+            
         full_calc_points = final_display_points
         
         final_name = name_hint if name_hint else get_stock_name_online(code)
         
+        # 加入燈號到名稱
+        final_name_display = f"{light} {final_name}"
+        
         return {
             "代號": code,
-            "名稱": final_name,
+            "名稱": final_name_display, # 更新為帶燈號的名稱
             "收盤價": round(current_price, 2),
             "漲跌幅": pct_change, 
             "當日漲停價": limit_up_col,   
@@ -514,6 +522,7 @@ with tab1:
         limit = st.session_state.limit_rows
         df_all = st.session_state.stock_data
         
+        # 自動修正舊資料 Key 名稱
         rename_map = {"漲停價": "當日漲停價", "跌停價": "當日跌停價"}
         df_all = df_all.rename(columns=rename_map)
         
@@ -579,7 +588,13 @@ with tab1:
                         if isinstance(points, list):
                             for p in points:
                                 if abs(p['val'] - price) < 0.01:
-                                    hit_type = 'normal'
+                                    # 根據戰略備註的 Tag 決定顏色
+                                    if "漲停" in p['tag']:
+                                        hit_type = 'up'
+                                    elif "跌停" in p['tag']:
+                                        hit_type = 'down'
+                                    else:
+                                        hit_type = 'normal'
                                     break
                 except:
                     pass
