@@ -14,7 +14,7 @@ import json
 # ==========================================
 st.set_page_config(page_title="當沖戰略室", page_icon="⚡", layout="wide")
 
-# 1. 標題
+# 1. 標題位置 (確保不被遮擋)
 st.title("⚡ 當沖戰略室 ⚡")
 
 CONFIG_FILE = "config.json"
@@ -108,7 +108,7 @@ st.markdown(f"""
         width: 100%;
     }}
     
-    /* 讓計算機的 Metric 顯示大一點 */
+    /* 計算機頁面特定樣式 */
     [data-testid="stMetricValue"] {{
         font-size: 1.2em;
     }}
@@ -183,6 +183,11 @@ def search_code_online(query):
 
 def get_tick_size(price):
     """取得台股價格對應的跳動檔位"""
+    try:
+        price = float(price)
+    except:
+        return 0.01
+        
     if pd.isna(price) or price <= 0: return 0.01
     if price < 10: return 0.01
     if price < 50: return 0.05
@@ -195,7 +200,7 @@ def calculate_limits(price):
     """計算漲跌停價 (10%)"""
     try:
         p = float(price)
-        if math.isnan(p) or p <= 0: return 0, 0
+        if pd.isna(p) or p <= 0: return 0, 0
         
         raw_up = p * 1.10
         tick_up = get_tick_size(raw_up) 
@@ -213,7 +218,7 @@ def apply_tick_rules(price):
     """將任意價格修正為符合台股 Tick 規則的價格"""
     try:
         p = float(price)
-        if math.isnan(p): return 0.0
+        if pd.isna(p): return 0.0
         tick = get_tick_size(p)
         rounded_price = round(p / tick) * tick
         return float(f"{rounded_price:.2f}")
@@ -222,16 +227,19 @@ def apply_tick_rules(price):
 
 def move_tick(price, steps):
     """計算價格往上或往下 N 檔後的價格"""
-    curr = float(price)
-    if steps > 0:
-        for _ in range(steps):
-            tick = get_tick_size(curr)
-            curr = round(curr + tick, 2)
-    elif steps < 0:
-        for _ in range(abs(steps)):
-            tick = get_tick_size(curr - 0.0001)
-            curr = round(curr - tick, 2)
-    return curr
+    try:
+        curr = float(price)
+        if steps > 0:
+            for _ in range(steps):
+                tick = get_tick_size(curr)
+                curr = round(curr + tick, 2)
+        elif steps < 0:
+            for _ in range(abs(steps)):
+                tick = get_tick_size(curr - 0.0001)
+                curr = round(curr - tick, 2)
+        return curr
+    except:
+        return price
 
 def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     code = str(code).strip()
@@ -245,8 +253,14 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
 
         today = hist.iloc[-1]
         current_price = today['Close']
-        prev_day = hist.iloc[-2] if len(hist) >= 2 else today
         
+        # 確保昨日資料存在
+        if len(hist) >= 2:
+            prev_day = hist.iloc[-2]
+        else:
+            prev_day = today
+        
+        # 檢查數據有效性 (防止 NaN 傳遞導致後續崩潰)
         if pd.isna(current_price) or pd.isna(prev_day['Close']):
             return None
 
@@ -268,7 +282,12 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         points.append({"val": apply_tick_rules(today['High']), "tag": ""})
         points.append({"val": apply_tick_rules(today['Low']), "tag": ""})
         
-        past_5 = hist.iloc[-6:-1] if len(hist) >= 6 else hist.iloc[:-1]
+        # 近期 5日 高低
+        if len(hist) >= 6:
+            past_5 = hist.iloc[-6:-1]
+        else:
+            past_5 = hist.iloc[:-1]
+            
         if not past_5.empty:
             points.append({"val": apply_tick_rules(past_5['High'].max()), "tag": ""})
             points.append({"val": apply_tick_rules(past_5['Low'].min()), "tag": ""})
@@ -282,11 +301,13 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         display_candidates = []
         for p in points:
             v = float(f"{p['val']:.2f}")
+            # 備註過濾邏輯
             is_in_range = limit_down_col <= v <= limit_up_col
             is_5ma = "多" in p['tag'] or "空" in p['tag']
             if is_in_range or is_5ma:
                 display_candidates.append({"val": v, "tag": p['tag']})
         
+        # 檢查是否觸及今日漲跌停
         touched_up = today['High'] >= limit_up_today - 0.01
         touched_down = today['Low'] <= limit_down_today + 0.01
 
@@ -309,8 +330,10 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             is_limit_down = "跌停" in tags
             is_high = "高" in tags
             is_low = "低" in tags
+            
             is_close_price = abs(val - current_price) < 0.01
             
+            # --- 漲停高/跌停低 + 延伸計算 ---
             if is_limit_up:
                 if is_high and is_close_price: 
                     final_tag = "漲停高"
@@ -318,6 +341,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
                     extra_points.append({"val": ext_val, "tag": ""})
                 else:
                     final_tag = "漲停"
+                    
             elif is_limit_down:
                 if is_low and is_close_price:
                     final_tag = "跌停低"
@@ -371,6 +395,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             "_points": full_calc_points
         }
     except Exception as e:
+        # 捕捉所有錯誤並回傳 None，避免程式崩潰
         return None
 
 # ==========================================
@@ -408,6 +433,7 @@ with tab1:
     if st.button("🚀 執行分析", type="primary"):
         targets = []
         
+        # 1. 處理上傳清單
         if uploaded_file:
             try:
                 if uploaded_file.name.endswith('.csv'): 
@@ -432,6 +458,7 @@ with tab1:
             except Exception as e:
                 st.error(f"讀取失敗: {e}")
 
+        # 2. 處理搜尋輸入
         if search_query:
             inputs = [x.strip() for x in search_query.replace('，',',').split(',') if x.strip()]
             for inp in inputs:
@@ -469,7 +496,6 @@ with tab1:
         limit = st.session_state.limit_rows
         df_all = st.session_state.stock_data
         
-        # 自動修正欄位名稱
         rename_map = {"漲停價": "當日漲停價", "跌停價": "當日跌停價"}
         df_all = df_all.rename(columns=rename_map)
         
@@ -520,23 +546,25 @@ with tab1:
             hit_type = 'none'
 
             if not (pd.isna(custom_price) or custom_price == ""):
-                price = float(custom_price)
-                points = row['_points']
-                
-                # 3. 修復 TypeError：先檢查值是否存在
-                limit_up = df_display.at[idx, '當日漲停價']
-                limit_down = df_display.at[idx, '當日跌停價']
-                
-                # 確保 limit_up / limit_down 是數字且非空
-                if pd.notna(limit_up) and abs(price - limit_up) < 0.01:
-                    hit_type = 'up' 
-                elif pd.notna(limit_down) and abs(price - limit_down) < 0.01:
-                    hit_type = 'down'
-                else:
-                    for p in points:
-                        if abs(p['val'] - price) < 0.01:
-                            hit_type = 'normal'
-                            break
+                try:
+                    price = float(custom_price)
+                    points = row['_points']
+                    
+                    limit_up = df_display.at[idx, '當日漲停價']
+                    limit_down = df_display.at[idx, '當日跌停價']
+                    
+                    if pd.notna(limit_up) and abs(price - limit_up) < 0.01:
+                        hit_type = 'up' 
+                    elif pd.notna(limit_down) and abs(price - limit_down) < 0.01:
+                        hit_type = 'down'
+                    else:
+                        if isinstance(points, list):
+                            for p in points:
+                                if abs(p['val'] - price) < 0.01:
+                                    hit_type = 'normal'
+                                    break
+                except:
+                    pass
                             
             results_hit.append({"_hit_type": hit_type})
         
@@ -640,7 +668,11 @@ with tab2:
             profit = income - cost
             total_fee = buy_fee + sell_fee
             
-        roi = (profit / (base_p * shares)) * 100
+        if base_p * shares != 0:
+            roi = (profit / (base_p * shares)) * 100
+        else:
+            roi = 0
+            
         diff = p - base_p
         diff_str = f"{diff:+.2f}" if diff != 0 else "0.00"
         
