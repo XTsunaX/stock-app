@@ -257,7 +257,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             ticker = yf.Ticker(f"{code}.TWO")
             hist = ticker.history(period="3mo")
         if hist.empty: 
-            # st.error(f"⚠️ 代號 {code}: 抓取無資料 (Yahoo Finance 返回空值)。")
+            st.error(f"⚠️ 代號 {code}: 抓取無資料 (Yahoo Finance 返回空值)。")
             return None
 
         today = hist.iloc[-1]
@@ -385,9 +385,12 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         
         strategy_note = "-".join(note_parts)
         
-        # 關鍵修正: _points 只包含 final_display_points (即有顯示在備註的點)
-        # 這樣前端比對時，只有顯示出來的點位才會亮燈
-        # 這樣就解決了 "隱藏點位不亮燈" 和 "未觸及漲跌停不亮燈" 的問題
+        # 關鍵修正: _points 只使用 final_display_points
+        # 這樣隱藏的點位 (被過濾掉的) 就不會出現在 _points 中，不會觸發亮燈
+        
+        full_calc_points = final_display_points
+        
+        final_name = name_hint if name_hint else get_stock_name_online(code)
         
         return {
             "代號": code,
@@ -400,7 +403,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             "獲利目標": target_price, 
             "防守停損": stop_price,   
             "戰略備註": strategy_note,
-            "_points": final_display_points # 只回傳顯示的點位
+            "_points": full_calc_points
         }
     except Exception as e:
         st.error(f"⚠️ 代號 {code} 發生錯誤: {e}")
@@ -511,7 +514,6 @@ with tab1:
         limit = st.session_state.limit_rows
         df_all = st.session_state.stock_data
         
-        # 自動修正舊資料 Key 名稱
         rename_map = {"漲停價": "當日漲停價", "跌停價": "當日跌停價"}
         df_all = df_all.rename(columns=rename_map)
         
@@ -566,17 +568,19 @@ with tab1:
                     price = float(custom_price)
                     points = row['_points']
                     
-                    if isinstance(points, list):
-                        for p in points:
-                            if abs(p['val'] - price) < 0.01:
-                                # 根據 Tag 決定顏色
-                                if "漲停" in p['tag']:
-                                    hit_type = 'up' # 紅色
-                                elif "跌停" in p['tag']:
-                                    hit_type = 'down' # 綠色
-                                else:
-                                    hit_type = 'normal' # 黃色
-                                break
+                    limit_up = df_display.at[idx, '當日漲停價']
+                    limit_down = df_display.at[idx, '當日跌停價']
+                    
+                    if pd.notna(limit_up) and abs(price - limit_up) < 0.01:
+                        hit_type = 'up' 
+                    elif pd.notna(limit_down) and abs(price - limit_down) < 0.01:
+                        hit_type = 'down'
+                    else:
+                        if isinstance(points, list):
+                            for p in points:
+                                if abs(p['val'] - price) < 0.01:
+                                    hit_type = 'normal'
+                                    break
                 except:
                     pass
                             
