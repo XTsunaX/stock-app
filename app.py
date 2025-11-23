@@ -43,11 +43,9 @@ def save_config(font_size, limit_rows):
 if 'stock_data' not in st.session_state:
     st.session_state.stock_data = pd.DataFrame()
 
-# 損益試算專用 Session State
+# 計算機用的 Session State
 if 'calc_base_price' not in st.session_state:
-    st.session_state.calc_base_price = 100.0 # 成本價(基準)
-if 'calc_view_price' not in st.session_state:
-    st.session_state.calc_view_price = 100.0 # 視野中心價
+    st.session_state.calc_base_price = 100.0
 
 # 優先從設定檔讀取
 saved_config = load_config()
@@ -256,7 +254,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             ticker = yf.Ticker(f"{code}.TWO")
             hist = ticker.history(period="3mo")
         if hist.empty: 
-            st.error(f"⚠️ 代號 {code}: 抓取無資料 (Yahoo Finance 返回空值)。")
+            # st.error(f"⚠️ 代號 {code}: 抓取無資料 (Yahoo Finance 返回空值)。")
             return None
 
         today = hist.iloc[-1]
@@ -272,12 +270,15 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
 
         pct_change = ((current_price - prev_day['Close']) / prev_day['Close']) * 100
         
+        # 1. 欄位顯示用的數據 (以收盤價為基準)
         target_price = apply_tick_rules(current_price * 1.03)
         stop_price = apply_tick_rules(current_price * 0.97)
         limit_up_col, limit_down_col = calculate_limits(current_price) 
 
+        # 2. 戰略備註用的漲跌停參考 (以昨日收盤為基準)
         limit_up_today, limit_down_today = calculate_limits(prev_day['Close'])
 
+        # 點位收集
         points = []
         ma5 = apply_tick_rules(hist['Close'].tail(5).mean())
         points.append({"val": ma5, "tag": "多" if current_price > ma5 else "空"})
@@ -299,14 +300,17 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         points.append({"val": high_90, "tag": "高"})
         points.append({"val": low_90, "tag": "低"})
 
+        # 戰略備註整理
         display_candidates = []
         for p in points:
             v = float(f"{p['val']:.2f}")
+            # 備註過濾邏輯
             is_in_range = limit_down_col <= v <= limit_up_col
             is_5ma = "多" in p['tag'] or "空" in p['tag']
             if is_in_range or is_5ma:
                 display_candidates.append({"val": v, "tag": p['tag']})
         
+        # 檢查是否觸及今日漲跌停
         touched_up = today['High'] >= limit_up_today - 0.01
         touched_down = today['Low'] <= limit_down_today + 0.01
 
@@ -329,8 +333,10 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             is_limit_down = "跌停" in tags
             is_high = "高" in tags
             is_low = "低" in tags
+            
             is_close_price = abs(val - current_price) < 0.01
             
+            # --- 漲停高/跌停低 + 延伸計算 ---
             if is_limit_up:
                 if is_high and is_close_price: 
                     final_tag = "漲停高"
@@ -449,13 +455,16 @@ with tab1:
     if st.button("🚀 執行分析", type="primary"):
         targets = []
         
+        # 1. 處理上傳清單
         if uploaded_file:
             try:
                 if uploaded_file.name.endswith('.csv'): 
-                    df_up = pd.read_csv(uploaded_file, dtype=str)
+                    # 已在上面讀取
+                    pass
                 else: 
                     if 'xl' in locals() and xl:
-                        df_up = pd.read_excel(uploaded_file, sheet_name=selected_sheet, dtype=str)
+                        # 移除 dtype=str 以免引擎錯誤，改後處理
+                        df_up = pd.read_excel(uploaded_file, sheet_name=selected_sheet)
                     else:
                         df_up = pd.DataFrame()
                 
@@ -465,6 +474,7 @@ with tab1:
                     
                     if c_col:
                         for _, row in df_up.iterrows():
+                            # 先轉字串，去小數點，再補零
                             c_raw = str(row[c_col])
                             c = c_raw.split('.')[0].strip()
                             
@@ -475,6 +485,7 @@ with tab1:
             except Exception as e:
                 st.error(f"讀取失敗: {e}")
 
+        # 2. 處理搜尋輸入
         if search_query:
             inputs = [x.strip() for x in search_query.replace('，',',').split(',') if x.strip()]
             for inp in inputs:
@@ -565,6 +576,7 @@ with tab1:
                 try:
                     price = float(custom_price)
                     points = row['_points']
+                    
                     limit_up = df_display.at[idx, '當日漲停價']
                     limit_down = df_display.at[idx, '當日跌停價']
                     
@@ -622,9 +634,9 @@ with tab1:
 with tab2:
     st.markdown("#### 💰 當沖損益試算 💰")
     
-    c1, c2, c3, c4 = st.columns(4)
+    # 這裡加入 columns(5) 以放置新的 "顯示檔數" 選項
+    c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
-        # 每次修改 input 都會更新 session state
         calc_price = st.number_input(
             "基準價格", 
             value=float(st.session_state.calc_base_price), 
@@ -632,10 +644,8 @@ with tab2:
             format="%.2f",
             key="input_base_price"
         )
-        # 如果數值有變，更新 session state
         if calc_price != st.session_state.calc_base_price:
             st.session_state.calc_base_price = calc_price
-            # 同步更新 view_price 以重置視野
             st.session_state.calc_view_price = calc_price
             
     with c2:
@@ -644,47 +654,46 @@ with tab2:
         discount = st.number_input("手續費折扣 (折)", value=2.8, step=0.1, min_value=0.1, max_value=10.0)
     with c4:
         min_fee = st.number_input("最低手續費 (元)", value=20, step=1)
+    
+    # 新增：顯示檔數設定
+    with c5:
+        tick_count = st.number_input("顯示檔數 (檔)", value=5, min_value=1, max_value=50, step=1)
         
     direction = st.radio("交易方向", ["當沖多 (先買後賣)", "當沖空 (先賣後買)"], horizontal=True)
     
-    # 計算漲跌停 (以基準價為準)
+    # 計算漲跌停
     limit_up, limit_down = calculate_limits(st.session_state.calc_base_price)
     
-    # 按鈕邏輯：只移動 View Price，不改變基準價
     b1, b2, _ = st.columns([1, 1, 6])
     with b1:
         if st.button("🔼 向上", use_container_width=True):
-            # 往上移 5 檔
-            st.session_state.calc_view_price = move_tick(st.session_state.calc_view_price, 5)
-            # 卡在漲停
+            # 移動步數 = 顯示檔數 (或保持 5，這裡改為 tick_count 讓翻頁更順)
+            st.session_state.calc_view_price = move_tick(st.session_state.calc_view_price, tick_count)
             if st.session_state.calc_view_price > limit_up:
                 st.session_state.calc_view_price = limit_up
             st.rerun()
             
     with b2:
         if st.button("🔽 向下", use_container_width=True):
-            st.session_state.calc_view_price = move_tick(st.session_state.calc_view_price, -5)
-            # 卡在跌停
+            st.session_state.calc_view_price = move_tick(st.session_state.calc_view_price, -tick_count)
             if st.session_state.calc_view_price < limit_down:
                 st.session_state.calc_view_price = limit_down
             st.rerun()
             
-    # 生成顯示資料 (以 view_price 為中心)
-    ticks_range = range(5, -6, -1) # 上下 5 檔
+    # 使用使用者設定的 tick_count 來決定範圍
+    ticks_range = range(tick_count, -(tick_count + 1), -1)
     calc_data = []
     
-    base_p = st.session_state.calc_base_price # 固定成本
-    view_p = st.session_state.calc_view_price # 視野中心
+    base_p = st.session_state.calc_base_price
+    view_p = st.session_state.calc_view_price
     
     is_long = "多" in direction
     fee_rate = 0.001425
     tax_rate = 0.0015 
     
     for i in ticks_range:
-        # 以視野中心為基準產生報價
         p = move_tick(view_p, i)
         
-        # 超出漲跌停不顯示
         if p > limit_up or p < limit_down:
             continue
             
@@ -721,7 +730,6 @@ with tab2:
         diff = p - base_p
         diff_str = f"{diff:+.2f}" if diff != 0 else "0.00"
         
-        # 標記是否為漲跌停
         note_type = ""
         if abs(p - limit_up) < 0.001: note_type = "up"
         elif abs(p - limit_down) < 0.001: note_type = "down"
@@ -740,14 +748,12 @@ with tab2:
     df_calc = pd.DataFrame(calc_data)
     
     def style_calc_row(row):
-        # 漲跌停優先變色
         nt = row['_note_type']
         if nt == 'up':
             return ['background-color: #ff4b4b; color: white; font-weight: bold'] * len(row)
         elif nt == 'down':
             return ['background-color: #00cc00; color: white; font-weight: bold'] * len(row)
             
-        # 一般損益變色
         prof = row['_profit']
         if prof > 0:
             return ['color: #ff4b4b; font-weight: bold'] * len(row) 
