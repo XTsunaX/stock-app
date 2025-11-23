@@ -90,6 +90,7 @@ font_px = f"{st.session_state.font_size}px"
 
 st.markdown(f"""
     <style>
+    /* 調整上方內距，避免標題被遮擋 */
     .block-container {{ padding-top: 4.5rem; padding-bottom: 1rem; }}
     
     /* 套用到所有 Streamlit 表格相關元素 */
@@ -108,10 +109,9 @@ st.markdown(f"""
         width: 100%;
     }}
     
-    /* 讓計算機的 Metric 顯示大一點 */
-    [data-testid="stMetricValue"] {{
-        font-size: 1.2em;
-    }}
+    /* 隱藏索引列的額外 CSS 確保 */
+    thead tr th:first-child {{ display:none }}
+    tbody th {{ display:none }}
     </style>
 """, unsafe_allow_html=True)
 
@@ -247,6 +247,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         current_price = today['Close']
         prev_day = hist.iloc[-2] if len(hist) >= 2 else today
         
+        # 檢查數據有效性
         if pd.isna(current_price) or pd.isna(prev_day['Close']):
             return None
 
@@ -282,11 +283,14 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         display_candidates = []
         for p in points:
             v = float(f"{p['val']:.2f}")
+            # 備註過濾邏輯
             is_in_range = limit_down_col <= v <= limit_up_col
             is_5ma = "多" in p['tag'] or "空" in p['tag']
+            
             if is_in_range or is_5ma:
                 display_candidates.append({"val": v, "tag": p['tag']})
         
+        # 檢查是否觸及今日漲跌停
         touched_up = today['High'] >= limit_up_today - 0.01
         touched_down = today['Low'] <= limit_down_today + 0.01
 
@@ -309,8 +313,10 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             is_limit_down = "跌停" in tags
             is_high = "高" in tags
             is_low = "低" in tags
+            
             is_close_price = abs(val - current_price) < 0.01
             
+            # --- 漲停高/跌停低 + 延伸計算 ---
             if is_limit_up:
                 if is_high and is_close_price: 
                     final_tag = "漲停高"
@@ -396,6 +402,7 @@ with tab1:
                 else:
                     xl = pd.ExcelFile(uploaded_file) 
             except ImportError:
+                # 關鍵修正：若缺少套件，只顯示錯誤但不停止，讓搜尋功能可用
                 st.error("❌ 讀取 Excel 失敗：環境缺少 `openpyxl` 套件。")
             except Exception as e:
                 st.error(f"❌ 讀取檔案失敗: {e}")
@@ -408,11 +415,13 @@ with tab1:
     if st.button("🚀 執行分析", type="primary"):
         targets = []
         
+        # 1. 處理上傳清單
         if uploaded_file:
             try:
                 if uploaded_file.name.endswith('.csv'): 
                     df_up = pd.read_csv(uploaded_file)
                 else: 
+                    # 加入 check，若 xl 為 None 則跳過
                     if 'xl' in locals() and xl:
                         df_up = pd.read_excel(uploaded_file, sheet_name=selected_sheet)
                     else:
@@ -432,6 +441,7 @@ with tab1:
             except Exception as e:
                 st.error(f"讀取失敗: {e}")
 
+        # 2. 處理搜尋輸入
         if search_query:
             inputs = [x.strip() for x in search_query.replace('，',',').split(',') if x.strip()]
             for inp in inputs:
@@ -469,7 +479,7 @@ with tab1:
         limit = st.session_state.limit_rows
         df_all = st.session_state.stock_data
         
-        # 自動修正欄位名稱
+        # 修正欄位對應
         rename_map = {"漲停價": "當日漲停價", "跌停價": "當日跌停價"}
         df_all = df_all.rename(columns=rename_map)
         
@@ -523,11 +533,10 @@ with tab1:
                 price = float(custom_price)
                 points = row['_points']
                 
-                # 3. 修復 TypeError：先檢查值是否存在
                 limit_up = df_display.at[idx, '當日漲停價']
                 limit_down = df_display.at[idx, '當日跌停價']
                 
-                # 確保 limit_up / limit_down 是數字且非空
+                # 防止 TypeError (檢查是否為 NaN)
                 if pd.notna(limit_up) and abs(price - limit_up) < 0.01:
                     hit_type = 'up' 
                 elif pd.notna(limit_down) and abs(price - limit_down) < 0.01:
