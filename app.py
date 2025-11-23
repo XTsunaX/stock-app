@@ -14,7 +14,7 @@ import json
 # ==========================================
 st.set_page_config(page_title="當沖戰略室", page_icon="⚡", layout="wide")
 
-# 1. 標題位置
+# 標題
 st.title("⚡ 當沖戰略室 ⚡")
 
 CONFIG_FILE = "config.json"
@@ -178,6 +178,7 @@ def search_code_online(query):
 
 def get_tick_size(price):
     """取得台股價格對應的跳動檔位"""
+    if pd.isna(price) or price <= 0: return 0.01
     if price < 10: return 0.01
     if price < 50: return 0.05
     if price < 100: return 0.1
@@ -189,6 +190,8 @@ def calculate_limits(price):
     """計算漲跌停價 (10%)"""
     try:
         p = float(price)
+        if math.isnan(p) or p <= 0: return 0, 0 # 防止 NaN 崩潰
+        
         raw_up = p * 1.10
         tick_up = get_tick_size(raw_up) 
         limit_up = math.floor(raw_up / tick_up) * tick_up
@@ -205,6 +208,7 @@ def apply_tick_rules(price):
     """將任意價格修正為符合台股 Tick 規則的價格"""
     try:
         p = float(price)
+        if math.isnan(p): return 0.0
         tick = get_tick_size(p)
         rounded_price = round(p / tick) * tick
         return float(f"{rounded_price:.2f}")
@@ -220,7 +224,7 @@ def move_tick(price, steps):
             curr = round(curr + tick, 2)
     elif steps < 0:
         for _ in range(abs(steps)):
-            tick = get_tick_size(curr - 0.0001) # 往下時取下一檔的 tick
+            tick = get_tick_size(curr - 0.0001)
             curr = round(curr - tick, 2)
     return curr
 
@@ -238,6 +242,10 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         current_price = today['Close']
         prev_day = hist.iloc[-2] if len(hist) >= 2 else today
         
+        # 檢查數據有效性
+        if pd.isna(current_price) or pd.isna(prev_day['Close']):
+            return None
+
         pct_change = ((current_price - prev_day['Close']) / prev_day['Close']) * 100
         
         # 1. 欄位顯示用的數據 (以收盤價為基準)
@@ -270,21 +278,18 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         display_candidates = []
         for p in points:
             v = float(f"{p['val']:.2f}")
-            
             # 備註過濾邏輯
             is_in_range = limit_down_col <= v <= limit_up_col
             is_5ma = "多" in p['tag'] or "空" in p['tag']
-            
             if is_in_range or is_5ma:
                 display_candidates.append({"val": v, "tag": p['tag']})
         
-        # 檢查是否觸及今日漲跌停 (基於昨日收盤價)
+        # 檢查是否觸及今日漲跌停
         touched_up = today['High'] >= limit_up_today - 0.01
         touched_down = today['Low'] <= limit_down_today + 0.01
 
         if touched_up:
             display_candidates.append({"val": limit_up_today, "tag": "漲停"})
-        
         if touched_down:
             display_candidates.append({"val": limit_down_today, "tag": "跌停"})
             
@@ -313,7 +318,6 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
                     extra_points.append({"val": ext_val, "tag": ""})
                 else:
                     final_tag = "漲停"
-                    
             elif is_limit_down:
                 if is_low and is_close_price:
                     final_tag = "跌停低"
@@ -353,14 +357,13 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         strategy_note = "-".join(note_parts)
         final_name = name_hint if name_hint else get_stock_name_online(code)
         
-        # 2. 修正：回傳的 Key 必須與 input_cols 一致
         return {
             "代號": code,
             "名稱": final_name,
             "收盤價": round(current_price, 2),
             "漲跌幅": pct_change, 
-            "當日漲停價": limit_up_col,   # 統一 key
-            "當日跌停價": limit_down_col, # 統一 key
+            "當日漲停價": limit_up_col,   
+            "當日跌停價": limit_down_col,
             "自訂價(可修)": None, 
             "獲利目標": target_price, 
             "防守停損": stop_price,   
@@ -374,7 +377,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
 # 主介面 (Tabs)
 # ==========================================
 
-tab1, tab2 = st.tabs(["⚡ 當沖戰略室 ⚡", "💰 當沖損益試算 💰"])
+tab1, tab2 = st.tabs(["⚡ 當沖戰略室 ⚡", "⚡ 當沖損益計算 ⚡"])
 
 # -------------------------------------------------------
 # Tab 1: 當沖戰略室
@@ -461,7 +464,6 @@ with tab1:
             st.session_state.stock_data = pd.DataFrame(results)
 
     if not st.session_state.stock_data.empty:
-        
         limit = st.session_state.limit_rows
         df_all = st.session_state.stock_data
         
@@ -476,7 +478,6 @@ with tab1:
         else:
             df_display = df_all.head(limit).reset_index(drop=True)
         
-        # 3. 欄位排序更新
         input_cols = ["代號", "名稱", "收盤價", "漲跌幅", "戰略備註", "自訂價(可修)", "當日漲停價", "當日跌停價", "獲利目標", "防守停損", "_points"]
         
         for col in input_cols:
@@ -520,7 +521,6 @@ with tab1:
                 price = float(custom_price)
                 points = row['_points']
                 
-                # 3. 防止 TypeError: 檢查值是否存在
                 limit_up = df_display.at[idx, '當日漲停價']
                 limit_down = df_display.at[idx, '當日跌停價']
                 
@@ -598,7 +598,7 @@ with tab2:
             st.session_state.calc_base_price = move_tick(st.session_state.calc_base_price, -5)
             st.rerun()
             
-    ticks_range = range(10, -11, -1) 
+    ticks_range = range(5, -6, -1) # 修正：顯示上下 5 檔
     calc_data = []
     
     base_p = st.session_state.calc_base_price
@@ -621,7 +621,6 @@ with tab2:
             cost = (buy_price * shares) + buy_fee
             income = (sell_price * shares) - sell_fee - tax
             profit = income - cost
-            
             total_fee = buy_fee + sell_fee
             
         else: 
@@ -635,11 +634,9 @@ with tab2:
             income = (sell_price * shares) - sell_fee - tax
             cost = (buy_price * shares) + buy_fee
             profit = income - cost
-            
             total_fee = buy_fee + sell_fee
             
         roi = (profit / (base_p * shares)) * 100
-        
         diff = p - base_p
         diff_str = f"{diff:+.2f}" if diff != 0 else "0.00"
         
