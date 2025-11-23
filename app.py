@@ -90,11 +90,7 @@ font_px = f"{st.session_state.font_size}px"
 
 st.markdown(f"""
     <style>
-    /* 1. 隱藏 Streamlit 頂部黑條 (Toolbar) */
-    header {{visibility: hidden;}}
-    
-    /* 調整上方內距 */
-    .block-container {{ padding-top: 2rem; padding-bottom: 1rem; }}
+    .block-container {{ padding-top: 4.5rem; padding-bottom: 1rem; }}
     
     /* 套用到所有 Streamlit 表格相關元素 */
     div[data-testid="stDataFrame"] table,
@@ -116,6 +112,10 @@ st.markdown(f"""
     [data-testid="stMetricValue"] {{
         font-size: 1.2em;
     }}
+    
+    /* 隱藏索引列的額外 CSS 確保 */
+    thead tr th:first-child {{ display:none }}
+    tbody th {{ display:none }}
     </style>
 """, unsafe_allow_html=True)
 
@@ -187,6 +187,11 @@ def search_code_online(query):
 
 def get_tick_size(price):
     """取得台股價格對應的跳動檔位"""
+    try:
+        price = float(price)
+    except:
+        return 0.01
+        
     if pd.isna(price) or price <= 0: return 0.01
     if price < 10: return 0.01
     if price < 50: return 0.05
@@ -248,17 +253,23 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         if hist.empty:
             ticker = yf.Ticker(f"{code}.TWO")
             hist = ticker.history(period="3mo")
-        if hist.empty: return None
+        if hist.empty: 
+            # 增加錯誤提示，讓使用者知道沒抓到資料
+            st.error(f"⚠️ 代號 {code}: 抓取無資料 (Yahoo Finance 返回空值)，請確認代號或稍後再試。")
+            return None
 
         today = hist.iloc[-1]
         current_price = today['Close']
         
+        # 確保昨日資料存在
         if len(hist) >= 2:
             prev_day = hist.iloc[-2]
         else:
             prev_day = today
         
+        # 檢查數據有效性 (防止 NaN 傳遞導致後續崩潰)
         if pd.isna(current_price) or pd.isna(prev_day['Close']):
+            st.error(f"⚠️ 代號 {code}: 價格數據異常 (NaN)。")
             return None
 
         pct_change = ((current_price - prev_day['Close']) / prev_day['Close']) * 100
@@ -297,11 +308,13 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         display_candidates = []
         for p in points:
             v = float(f"{p['val']:.2f}")
+            # 備註過濾邏輯
             is_in_range = limit_down_col <= v <= limit_up_col
             is_5ma = "多" in p['tag'] or "空" in p['tag']
             if is_in_range or is_5ma:
                 display_candidates.append({"val": v, "tag": p['tag']})
         
+        # 檢查是否觸及今日漲跌停
         touched_up = today['High'] >= limit_up_today - 0.01
         touched_down = today['Low'] <= limit_down_today + 0.01
 
@@ -388,6 +401,8 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             "_points": full_calc_points
         }
     except Exception as e:
+        # 這裡會顯示錯誤，幫助您除錯，而不是一片空白
+        st.error(f"⚠️ 代號 {code} 發生錯誤: {e}")
         return None
 
 # ==========================================
@@ -411,9 +426,13 @@ with tab1:
                 if uploaded_file.name.endswith('.csv'):
                     xl = None 
                 else:
-                    xl = pd.ExcelFile(uploaded_file) 
-            except ImportError:
-                st.error("❌ 讀取 Excel 失敗：環境缺少 `openpyxl` 套件。")
+                    # 檢查 openpyxl 是否可用
+                    import importlib.util
+                    if importlib.util.find_spec("openpyxl") is None:
+                        st.error("❌ 缺少 `openpyxl` 套件，無法讀取 Excel 檔。請在 requirements.txt 加入 openpyxl 並重啟 App。")
+                        xl = None
+                    else:
+                        xl = pd.ExcelFile(uploaded_file) 
             except Exception as e:
                 st.error(f"❌ 讀取檔案失敗: {e}")
 
@@ -542,6 +561,7 @@ with tab1:
                 try:
                     price = float(custom_price)
                     points = row['_points']
+                    
                     limit_up = df_display.at[idx, '當日漲停價']
                     limit_down = df_display.at[idx, '當日跌停價']
                     
