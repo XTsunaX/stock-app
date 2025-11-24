@@ -8,7 +8,6 @@ import time
 import os
 import itertools
 import json
-import io
 
 # ==========================================
 # 0. 頁面設定與初始化
@@ -48,6 +47,7 @@ if 'stock_data' not in st.session_state:
 if 'calc_base_price' not in st.session_state:
     st.session_state.calc_base_price = 100.0
 
+# [修正] 補上 calc_view_price 的初始化
 if 'calc_view_price' not in st.session_state:
     st.session_state.calc_view_price = 100.0
 
@@ -184,45 +184,6 @@ def search_code_online(query):
     except:
         pass
     return None
-
-# ==========================================
-# [修改] 改用 HiStock (嗨投資) 抓取週轉率排行
-# 原因: HiStock 是靜態網頁表格，比 Yahoo API 更不容易被雲端主機阻擋
-# ==========================================
-@st.cache_data(ttl=3600)
-def fetch_histock_ranking():
-    """抓取 HiStock 週轉率排行"""
-    # p=t 代表 Turnover (週轉率)
-    url = "https://histock.tw/stock/rank.aspx?p=t"
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
-    }
-    
-    try:
-        # 1. 請求網頁
-        res = requests.get(url, headers=headers, timeout=10)
-        res.encoding = "utf-8"
-        
-        # 2. 解析表格
-        dfs = pd.read_html(io.StringIO(res.text))
-        
-        # 3. 尋找正確的表格 (包含 '代號' 與 '名稱' 的那個)
-        target_df = None
-        for df in dfs:
-            if "代號" in df.columns and "名稱" in df.columns:
-                target_df = df
-                break
-        
-        if target_df is not None:
-            # 確保代號是字串格式
-            target_df['代號'] = target_df['代號'].astype(str)
-            return target_df[['代號', '名稱']]
-            
-        return None
-    except Exception as e:
-        # print(f"HiStock Error: {e}") # Debug用
-        return None
 
 # ==========================================
 # 2. 核心計算邏輯 (含台股 Tick 規則)
@@ -491,24 +452,10 @@ with tab1:
                 default_idx = 0
                 if "週轉率" in xl.sheet_names: default_idx = xl.sheet_names.index("週轉率")
                 selected_sheet = st.selectbox("工作表", xl.sheet_names, index=default_idx)
-        
-        # [修改] 來源改為 HiStock
-        use_histock = st.checkbox("🔥 匯入熱門週轉率排行 (來源: 嗨投資)")
 
     if st.button("🚀 執行分析", type="primary"):
         targets = []
         
-        # [修改] 處理 HiStock 資料
-        if use_histock:
-            with st.spinner("正在從 HiStock 嗨投資抓取熱門排行..."):
-                rank_df = fetch_histock_ranking()
-                if rank_df is not None:
-                    for _, row in rank_df.iterrows():
-                        targets.append((str(row['代號']), str(row['名稱']), 'histock', {}))
-                    st.toast(f"已匯入 {len(rank_df)} 檔熱門股", icon="🔥")
-                else:
-                    st.error("HiStock 連線失敗，請稍後再試。")
-
         # 1. 處理上傳清單
         if uploaded_file:
             try:
@@ -579,12 +526,10 @@ with tab1:
         rename_map = {"漲停價": "當日漲停價", "跌停價": "當日跌停價"}
         df_all = df_all.rename(columns=rename_map)
         
-        # [修改] 排序邏輯：優先顯示搜尋 > HiStock > 上傳
         if '_source' in df_all.columns:
             df_up = df_all[df_all['_source'] == 'upload'].head(limit)
             df_se = df_all[df_all['_source'] == 'search']
-            df_histock = df_all[df_all['_source'] == 'histock'].head(limit)
-            df_display = pd.concat([df_se, df_histock, df_up]).reset_index(drop=True)
+            df_display = pd.concat([df_up, df_se]).reset_index(drop=True)
         else:
             df_display = df_all.head(limit).reset_index(drop=True)
         
@@ -690,7 +635,7 @@ with tab1:
             )
 
 # -------------------------------------------------------
-# Tab 2: 當沖損益試算 (保持原樣)
+# Tab 2: 當沖損益試算
 # -------------------------------------------------------
 with tab2:
     st.markdown("#### 💰 當沖損益試算 💰")
@@ -724,22 +669,28 @@ with tab2:
     
     b1, b2, _ = st.columns([1, 1, 6])
     with b1:
-        if st.button("🔽 向上 (價格+1檔)", use_container_width=True): # 修正按鈕邏輯
+        if st.button("🔼 向上", use_container_width=True):
             if 'calc_view_price' not in st.session_state: st.session_state.calc_view_price = st.session_state.calc_base_price
-            st.session_state.calc_view_price = move_tick(st.session_state.calc_view_price, 1) # 只移動1檔方便操作
+            
+            st.session_state.calc_view_price = move_tick(st.session_state.calc_view_price, tick_count)
+            if st.session_state.calc_view_price > limit_up:
+                st.session_state.calc_view_price = limit_up
             st.rerun()
             
     with b2:
-        if st.button("🔼 向下 (價格-1檔)", use_container_width=True): # 修正按鈕邏輯
+        if st.button("🔽 向下", use_container_width=True):
             if 'calc_view_price' not in st.session_state: st.session_state.calc_view_price = st.session_state.calc_base_price
-            st.session_state.calc_view_price = move_tick(st.session_state.calc_view_price, -1) # 只移動1檔方便操作
+            
+            st.session_state.calc_view_price = move_tick(st.session_state.calc_view_price, -tick_count)
+            if st.session_state.calc_view_price < limit_down:
+                st.session_state.calc_view_price = limit_down
             st.rerun()
-    
-    # 計算並顯示表格 (保持你原有的邏輯)
+            
     ticks_range = range(tick_count, -(tick_count + 1), -1)
     calc_data = []
     
     base_p = st.session_state.calc_base_price
+    
     if 'calc_view_price' not in st.session_state:
         st.session_state.calc_view_price = base_p
     view_p = st.session_state.calc_view_price
