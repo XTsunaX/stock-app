@@ -8,6 +8,8 @@ import time
 import os
 import itertools
 import json
+from datetime import datetime, time as dt_time
+import pytz
 
 # ==========================================
 # 0. 頁面設定與初始化
@@ -252,33 +254,55 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     code = str(code).strip()
     try:
         ticker = yf.Ticker(f"{code}.TW")
+        # 抓取稍多一點資料以防被切掉
         hist = ticker.history(period="3mo") 
         if hist.empty:
             ticker = yf.Ticker(f"{code}.TWO")
             hist = ticker.history(period="3mo")
         if hist.empty: 
-            st.error(f"⚠️ 代號 {code}: 抓取無資料 (Yahoo Finance 返回空值)。")
+            st.error(f"⚠️ 代號 {code}: 抓取無資料。")
             return None
 
+        # --- 2. 修正：盤中不更新邏輯 ---
+        # 如果最新一筆資料是「今天」，且現在時間 < 13:45 (盤中)，則切掉最後一筆，使用前一日收盤資料
+        # 這樣能確保在盤中時，看到的是基於昨天收盤的靜態分析
+        
+        tz = pytz.timezone('Asia/Taipei')
+        now = datetime.now(tz)
+        last_date = hist.index[-1].date()
+        
+        is_today_data = (last_date == now.date())
+        is_during_trading = (now.time() < dt_time(13, 45))
+        
+        if is_today_data and is_during_trading:
+            # 盤中：忽略最後一筆(即時價)，使用前一筆(昨收)
+            # 注意：若 hist 只有一筆(新上市)，這樣切會空掉，需防呆
+            if len(hist) > 1:
+                hist = hist.iloc[:-1]
+        
+        # 經過處理後的「最新」資料 (可能是昨收，也可能是今收)
         today = hist.iloc[-1]
-        current_price = today['Close']
+        current_price = today['Close'] # 這就是我們要顯示的「收盤價」
         
         if len(hist) >= 2:
             prev_day = hist.iloc[-2]
         else:
-            prev_day = today
+            prev_day = today # 如果只有一天資料，昨收=今收
         
-        if pd.isna(current_price) or pd.isna(prev_day['Close']):
+        if pd.isna(current_price):
             return None
 
         pct_change = ((current_price - prev_day['Close']) / prev_day['Close']) * 100
         
-        # 1. 欄位顯示用的數據 (以收盤價為基準)
+        # 1. 欄位顯示用的數據 (以 current_price 為基準)
+        # 注意：因為我們可能切掉了即時價，這裡的 current_price 實際上是「前一日收盤」
+        # 所以這些計算出來的漲跌停、目標價，就是「今日」的操作參考
         target_price = apply_tick_rules(current_price * 1.03)
         stop_price = apply_tick_rules(current_price * 0.97)
         limit_up_col, limit_down_col = calculate_limits(current_price) 
 
-        # 2. 戰略備註用的漲跌停參考 (以昨日收盤為基準)
+        # 2. 戰略備註用的漲跌停參考 (以 prev_day 為基準，即前前日收盤)
+        # 這是為了判斷 current_price (前一日收盤) 是否為漲跌停
         limit_up_today, limit_down_today = calculate_limits(prev_day['Close'])
 
         # 點位收集
@@ -307,13 +331,13 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         display_candidates = []
         for p in points:
             v = float(f"{p['val']:.2f}")
-            # 備註過濾邏輯：確保顯示的點位不超過收盤價預測的漲跌停範圍
+            # 備註過濾：不超過漲跌停範圍 (這裡用 limit_up_col 即今日限制)
             is_in_range = limit_down_col <= v <= limit_up_col
             is_5ma = "多" in p['tag'] or "空" in p['tag']
             if is_in_range or is_5ma:
                 display_candidates.append({"val": v, "tag": p['tag']})
         
-        # 檢查是否觸及今日漲跌停 (基於昨日收盤價)
+        # 檢查是否觸及漲跌停 (檢查 current_price 這一天的最高最低)
         touched_up = today['High'] >= limit_up_today - 0.01
         touched_down = today['Low'] <= limit_down_today + 0.01
 
@@ -385,24 +409,14 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         
         strategy_note = "-".join(note_parts)
         
-        # 決定燈號
-        light = "⚪"
-        if "多" in strategy_note:
-            light = "🔴"
-        elif "空" in strategy_note:
-            light = "🟢"
-            
         # _points 只包含 final_display_points
         full_calc_points = final_display_points
         
         final_name = name_hint if name_hint else get_stock_name_online(code)
         
-        # 加入燈號到名稱
-        final_name_display = f"{light} {final_name}"
-        
         return {
             "代號": code,
-            "名稱": final_name_display, 
+            "名稱": final_name,
             "收盤價": round(current_price, 2),
             "漲跌幅": pct_change, 
             "當日漲停價": limit_up_col,   
@@ -532,8 +546,8 @@ with tab1:
         else:
             df_display = df_all.head(limit).reset_index(drop=True)
         
-        # 更新輸入欄位排序: 代號 名稱 收盤價 漲跌幅 戰略備註 自訂價 當日漲停價 當日跌停價 +3% -3%
-        input_cols = ["代號", "名稱", "收盤價", "漲跌幅", "戰略備註", "自訂價(可修)", "當日漲停價", "當日跌停價", "獲利目標", "防守停損", "_points"]
+        # 更新欄位順序: 代號 名稱 戰略備註 自訂價 當日漲停價 當日跌停價 +3% -3% 收盤價 漲跌幅
+        input_cols = ["代號", "名稱", "戰略備註", "自訂價(可修)", "當日漲停價", "當日跌停價", "獲利目標", "防守停損", "收盤價", "漲跌幅", "_points"]
         
         for col in input_cols:
             if col not in df_display.columns and col != "_points":
@@ -579,13 +593,13 @@ with tab1:
                     limit_up = df_display.at[idx, '當日漲停價']
                     limit_down = df_display.at[idx, '當日跌停價']
                     
-                    # 1. 檢查是否命中當日漲跌停 (紅/綠)
+                    # 1. 優先檢查是否等於當日漲跌停 (紅/綠)
                     if pd.notna(limit_up) and abs(price - limit_up) < 0.01:
                         hit_type = 'up' 
                     elif pd.notna(limit_down) and abs(price - limit_down) < 0.01:
                         hit_type = 'down'
                     else:
-                        # 2. 檢查是否命中戰略點位 (黃)
+                        # 2. 其次檢查是否在戰略備註點位內 (黃)
                         if isinstance(points, list):
                             for p in points:
                                 if abs(p['val'] - price) < 0.01:
@@ -604,7 +618,7 @@ with tab1:
         mask = final_df['自訂價(可修)'].notna() & (final_df['自訂價(可修)'] != "")
         
         if mask.any():
-            # 更新結果表格欄位排序: 代號 名稱 戰略備註 自訂價 +3% -3%
+            # 更新結果欄位順序: 代號 名稱 戰略備註 自訂價 +3% -3%
             display_cols = ["代號", "名稱", "戰略備註", "自訂價(可修)", "獲利目標", "防守停損", "_hit_type"]
             display_df = final_df[mask][display_cols]
             
