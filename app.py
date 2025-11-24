@@ -8,6 +8,8 @@ import time
 import os
 import itertools
 import json
+from datetime import datetime, time as dt_time
+import pytz
 
 # ==========================================
 # 0. 頁面設定與初始化
@@ -257,9 +259,21 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             ticker = yf.Ticker(f"{code}.TWO")
             hist = ticker.history(period="3mo")
         if hist.empty: 
-            # st.error(f"⚠️ 代號 {code}: 抓取無資料 (Yahoo Finance 返回空值)。")
+            st.error(f"⚠️ 代號 {code}: 抓取無資料。")
             return None
 
+        # 判斷盤中時間，若為盤中則取昨收數據，否則取最新
+        tz = pytz.timezone('Asia/Taipei')
+        now = datetime.now(tz)
+        last_date = hist.index[-1].date()
+        
+        is_today_data = (last_date == now.date())
+        is_during_trading = (now.time() < dt_time(13, 45))
+        
+        if is_today_data and is_during_trading:
+            if len(hist) > 1:
+                hist = hist.iloc[:-1]
+        
         today = hist.iloc[-1]
         current_price = today['Close']
         
@@ -273,7 +287,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
 
         pct_change = ((current_price - prev_day['Close']) / prev_day['Close']) * 100
         
-        # 1. 欄位顯示用的數據 (以收盤價為基準)
+        # 1. 欄位顯示用的數據
         target_price = apply_tick_rules(current_price * 1.03)
         stop_price = apply_tick_rules(current_price * 0.97)
         limit_up_col, limit_down_col = calculate_limits(current_price) 
@@ -307,13 +321,11 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         display_candidates = []
         for p in points:
             v = float(f"{p['val']:.2f}")
-            # 備註過濾邏輯：確保顯示的點位不超過收盤價預測的漲跌停範圍
             is_in_range = limit_down_col <= v <= limit_up_col
             is_5ma = "多" in p['tag'] or "空" in p['tag']
             if is_in_range or is_5ma:
                 display_candidates.append({"val": v, "tag": p['tag']})
         
-        # 檢查是否觸及今日漲跌停 (基於昨日收盤價)
         touched_up = today['High'] >= limit_up_today - 0.01
         touched_down = today['Low'] <= limit_down_today + 0.01
 
@@ -339,7 +351,6 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             
             is_close_price = abs(val - current_price) < 0.01
             
-            # --- 漲停高/跌停低 + 延伸計算 ---
             if is_limit_up:
                 if is_high and is_close_price: 
                     final_tag = "漲停高"
@@ -384,13 +395,9 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             note_parts.append(item)
         
         strategy_note = "-".join(note_parts)
-        
-        # 關鍵修正: _points 只包含 final_display_points
         full_calc_points = final_display_points
-        
         final_name = name_hint if name_hint else get_stock_name_online(code)
         
-        # 加入燈號到名稱
         light = "⚪"
         if "多" in strategy_note: light = "🔴"
         elif "空" in strategy_note: light = "🟢"
@@ -452,10 +459,9 @@ with tab1:
     if st.button("🚀 執行分析", type="primary"):
         targets = []
         
-        # 1. 處理上傳清單
+        # 1. 處理上傳清單 (修正 ETF 讀取)
         if uploaded_file:
-            # 關鍵修正：重置檔案指標，確保能從頭讀取
-            uploaded_file.seek(0)
+            uploaded_file.seek(0) # 重置指標
             try:
                 if uploaded_file.name.endswith('.csv'): 
                     df_up = pd.read_csv(uploaded_file, dtype=str)
@@ -472,15 +478,13 @@ with tab1:
                     if c_col:
                         for _, row in df_up.iterrows():
                             c_raw = str(row[c_col])
-                            # 移除可能的小數點 (Excel 數字轉字串時可能出現)
                             c = c_raw.split('.')[0].strip()
                             
-                            if c.isdigit():
-                                # 關鍵修正：針對 ETF 補零 (2碼/3碼 都補到 4碼或5碼)
-                                # 一般股票如 2330 是 4碼 -> 不變
-                                # ETF 如 50 -> 0050, 878 -> 00878
-                                if len(c) <= 3: 
-                                    c = "00" + c
+                            # 修正邏輯: 不再強制檢查 c.isdigit()，允許含有英文的代號 (如 00859B)
+                            # 僅對純數字且長度不足的進行補零
+                            if c: 
+                                if c.isdigit():
+                                    if len(c) <= 3: c = "00" + c
                                 
                                 n = str(row[n_col]) if n_col else ""
                                 targets.append((c, n, 'upload', {}))
@@ -535,7 +539,7 @@ with tab1:
         else:
             df_display = df_all.head(limit).reset_index(drop=True)
         
-        input_cols = ["代號", "名稱", "收盤價", "漲跌幅", "戰略備註", "自訂價(可修)", "當日漲停價", "當日跌停價", "獲利目標", "防守停損", "_points"]
+        input_cols = ["代號", "名稱", "戰略備註", "自訂價(可修)", "當日漲停價", "當日跌停價", "獲利目標", "防守停損", "收盤價", "漲跌幅", "_points"]
         
         for col in input_cols:
             if col not in df_display.columns and col != "_points":
@@ -581,13 +585,11 @@ with tab1:
                     limit_up = df_display.at[idx, '當日漲停價']
                     limit_down = df_display.at[idx, '當日跌停價']
                     
-                    # 1. 檢查是否命中當日漲跌停 (紅/綠)
                     if pd.notna(limit_up) and abs(price - limit_up) < 0.01:
                         hit_type = 'up' 
                     elif pd.notna(limit_down) and abs(price - limit_down) < 0.01:
                         hit_type = 'down'
                     else:
-                        # 2. 檢查是否命中戰略點位 (黃)
                         if isinstance(points, list):
                             for p in points:
                                 if abs(p['val'] - price) < 0.01:
