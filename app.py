@@ -85,22 +85,32 @@ with st.sidebar:
         key='limit_rows'
     )
     
-    if st.button("💾 儲存設定"):
-        if save_config(current_font_size, current_limit_rows):
-            st.toast("設定已儲存！下次開啟將自動套用。", icon="✅")
-        else:
-            st.error("設定儲存失敗。")
-            
+    col_save, _ = st.columns([1, 1])
+    with col_save:
+        if st.button("💾 儲存設定"):
+            if save_config(current_font_size, current_limit_rows):
+                st.toast("設定已儲存！", icon="✅")
+            else:
+                st.error("設定儲存失敗。")
+
+    st.markdown("### 資料管理")
     # 管理已忽略名單
-    st.markdown("---")
     st.write(f"🚫 已忽略 **{len(st.session_state.ignored_stocks)}** 檔")
-    if st.button("🗑️ 清空已忽略名單"):
+    if st.button("♻️ 復原已忽略名單"):
         st.session_state.ignored_stocks.clear()
-        st.toast("已清空忽略名單，下次分析將重新顯示。", icon="🔄")
+        st.toast("已重置忽略名單。", icon="🔄")
+        st.rerun()
+        
+    # [新增] 清空所有資料按鈕
+    if st.button("🗑️ 清空所有資料", type="primary"):
+        st.session_state.stock_data = pd.DataFrame()
+        st.session_state.ignored_stocks = set()
+        st.toast("資料已清空", icon="🗑️")
         st.rerun()
     
+    st.markdown("---")
     st.caption("功能說明")
-    st.info("🗑️ **如何刪除股票？**\n\n在表格左側勾選並按 `Delete`，該股票下次分析時將不再出現。")
+    st.info("🗑️ **如何刪除股票？**\n\n在表格左側勾選並按 `Delete`，該股票將被隱藏，直到按下「復原」或「清空」。")
 
 # --- 動態 CSS ---
 font_px = f"{st.session_state.font_size}px"
@@ -109,7 +119,6 @@ st.markdown(f"""
     <style>
     .block-container {{ padding-top: 4.5rem; padding-bottom: 1rem; }}
     
-    /* 套用到所有 Streamlit 表格相關元素 */
     div[data-testid="stDataFrame"] table,
     div[data-testid="stDataFrame"] td,
     div[data-testid="stDataFrame"] th,
@@ -125,12 +134,10 @@ st.markdown(f"""
         width: 100%;
     }}
     
-    /* 計算機頁面特定樣式 */
     [data-testid="stMetricValue"] {{
         font-size: 1.2em;
     }}
     
-    /* 隱藏索引列 */
     thead tr th:first-child {{ display:none }}
     tbody th {{ display:none }}
     </style>
@@ -271,7 +278,6 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             ticker = yf.Ticker(f"{code}.TWO")
             hist = ticker.history(period="3mo")
         if hist.empty: 
-            # st.error(f"⚠️ 代號 {code}: 抓取無資料。") # 忽略無資料提示
             return None
 
         tz = pytz.timezone('Asia/Taipei')
@@ -281,6 +287,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         is_today_data = (last_date == now.date())
         is_during_trading = (now.time() < dt_time(13, 45))
         
+        # 盤中不更新邏輯：若為盤中，切掉最後一筆(即時價)，強制使用昨收
         if is_today_data and is_during_trading:
             if len(hist) > 1:
                 hist = hist.iloc[:-1]
@@ -298,12 +305,12 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
 
         pct_change = ((current_price - prev_day['Close']) / prev_day['Close']) * 100
         
-        # 1. 欄位顯示用的數據 (以收盤價為基準)
+        # 1. 欄位顯示用 (以 current_price 為準)
         target_price = apply_tick_rules(current_price * 1.03)
         stop_price = apply_tick_rules(current_price * 0.97)
         limit_up_col, limit_down_col = calculate_limits(current_price) 
 
-        # 2. 戰略備註用的漲跌停參考 (以昨日收盤為基準)
+        # 2. 戰略備註用 (以 prev_day 為準)
         limit_up_today, limit_down_today = calculate_limits(prev_day['Close'])
 
         # 點位收集
@@ -328,17 +335,14 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         points.append({"val": high_90, "tag": "高"})
         points.append({"val": low_90, "tag": "低"})
 
-        # 戰略備註整理
         display_candidates = []
         for p in points:
             v = float(f"{p['val']:.2f}")
-            # 備註過濾邏輯：確保顯示的點位不超過收盤價預測的漲跌停範圍
             is_in_range = limit_down_col <= v <= limit_up_col
             is_5ma = "多" in p['tag'] or "空" in p['tag']
             if is_in_range or is_5ma:
                 display_candidates.append({"val": v, "tag": p['tag']})
         
-        # 檢查是否觸及今日漲跌停 (基於昨日收盤價)
         touched_up = today['High'] >= limit_up_today - 0.01
         touched_down = today['Low'] <= limit_down_today + 0.01
 
@@ -364,7 +368,6 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             
             is_close_price = abs(val - current_price) < 0.01
             
-            # --- 漲停高/跌停低 + 延伸計算 ---
             if is_limit_up:
                 if is_high and is_close_price: 
                     final_tag = "漲停高"
@@ -413,7 +416,6 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         
         final_name = name_hint if name_hint else get_stock_name_online(code)
         
-        # 加入燈號到名稱
         light = "⚪"
         if "多" in strategy_note: light = "🔴"
         elif "空" in strategy_note: light = "🟢"
@@ -459,7 +461,7 @@ with tab1:
                 else:
                     import importlib.util
                     if importlib.util.find_spec("openpyxl") is None:
-                        st.error("❌ 缺少 `openpyxl` 套件，無法讀取 Excel 檔。請在 requirements.txt 加入 openpyxl 並重啟 App。")
+                        st.error("❌ 缺少 openpyxl，請安裝。")
                         xl = None
                     else:
                         xl = pd.ExcelFile(uploaded_file) 
@@ -495,11 +497,10 @@ with tab1:
                             c_raw = str(row[c_col])
                             c = c_raw.split('.')[0].strip()
                             
-                            # 修正: 檢查包含中文字或過長字串，排除非代號文字
+                            # 排除無效列
                             if not c or c.lower() == 'nan': continue
                             if len(c) > 10 or any('\u4e00' <= char <= '\u9fff' for char in c): continue
-                            
-                            # 修正: 不再強制 isdigit，允許英文代號
+
                             if c.isdigit():
                                 if len(c) <= 3: c = "00" + c
                             
@@ -529,16 +530,24 @@ with tab1:
         bar = st.progress(0)
         total = len(targets)
         
-        # fetch_cache 避免重複抓取 (代號為 key)
+        # [重要] 這裡先讀取既有的 stock_data 轉為 dict，以便累加
+        existing_data = {}
+        if not st.session_state.stock_data.empty:
+            # 轉換為以 (代號, source) 為 key 的字典，方便更新或新增
+            # 這裡簡化邏輯：若代號相同，我們視為要更新
+            for idx, row in st.session_state.stock_data.iterrows():
+                existing_data[row['代號']] = row.to_dict()
+
         fetch_cache = {}
         
         for i, (code, name, source, extra) in enumerate(targets):
-            # 過濾已忽略名單
+            # 忽略名單
             if code in st.session_state.ignored_stocks: continue
             
             if (code, source) in seen: continue
             if hide_etf and code.startswith("00"): continue
             
+            # 抓取資料
             if code in fetch_cache:
                 data = fetch_cache[code]
             else:
@@ -546,16 +555,22 @@ with tab1:
                 if data: fetch_cache[code] = data
             
             if data:
-                row_data = data.copy()
-                row_data['_source'] = source
-                results.append(row_data)
+                data['_source'] = source
+                # 更新或新增到 existing_data
+                existing_data[code] = data
                 seen.add((code, source))
                 
             if total > 0: bar.progress((i+1)/total)
         
         bar.empty()
-        if results:
-            st.session_state.stock_data = pd.DataFrame(results)
+        
+        # 將 existing_data 轉回 DataFrame
+        if existing_data:
+            st.session_state.stock_data = pd.DataFrame(list(existing_data.values()))
+        else:
+            # 如果清空了或沒資料，保持現狀或清空
+            # st.session_state.stock_data = pd.DataFrame() # 視需求而定，這裡選擇保留原樣或更新
+            pass
 
     if not st.session_state.stock_data.empty:
         limit = st.session_state.limit_rows
@@ -564,17 +579,22 @@ with tab1:
         rename_map = {"漲停價": "當日漲停價", "跌停價": "當日跌停價"}
         df_all = df_all.rename(columns=rename_map)
         
-        # 過濾已忽略的股票
+        # 過濾已忽略
         df_all = df_all[~df_all['代號'].isin(st.session_state.ignored_stocks)]
         
+        # 排序與切分：上傳在前，搜尋在後
         if '_source' in df_all.columns:
-            df_up = df_all[df_all['_source'] == 'upload'].head(limit)
+            df_up = df_all[df_all['_source'] == 'upload']
             df_se = df_all[df_all['_source'] == 'search']
-            df_display = pd.concat([df_up, df_se]).reset_index(drop=True)
+            
+            # 上傳只取前 limit 筆，搜尋全取
+            df_up_show = df_up.head(limit)
+            df_display = pd.concat([df_up_show, df_se]).reset_index(drop=True)
         else:
             df_display = df_all.head(limit).reset_index(drop=True)
         
-        input_cols = ["代號", "名稱", "戰略備註", "自訂價(可修)", "當日漲停價", "當日跌停價", "獲利目標", "防守停損", "收盤價", "漲跌幅", "_points"]
+        # 修正順序: 代號 名稱 戰略備註 自訂價 收盤價 漲跌幅 當日漲停價 當日跌停價 +3% -3%
+        input_cols = ["代號", "名稱", "戰略備註", "自訂價(可修)", "收盤價", "漲跌幅", "當日漲停價", "當日跌停價", "獲利目標", "防守停損", "_points"]
         
         for col in input_cols:
             if col not in df_display.columns and col != "_points":
@@ -629,17 +649,20 @@ with tab1:
                     limit_up = df_display.at[idx, '當日漲停價']
                     limit_down = df_display.at[idx, '當日跌停價']
                     
-                    # 1. 優先檢查是否等於當日漲跌停 (紅/綠)
                     if pd.notna(limit_up) and abs(price - limit_up) < 0.01:
                         hit_type = 'up' 
                     elif pd.notna(limit_down) and abs(price - limit_down) < 0.01:
                         hit_type = 'down'
                     else:
-                        # 2. 其次檢查是否在戰略備註點位內 (黃)
                         if isinstance(points, list):
                             for p in points:
                                 if abs(p['val'] - price) < 0.01:
-                                    hit_type = 'normal'
+                                    if "漲停" in p['tag']:
+                                        hit_type = 'up'
+                                    elif "跌停" in p['tag']:
+                                        hit_type = 'down'
+                                    else:
+                                        hit_type = 'normal'
                                     break
                 except:
                     pass
