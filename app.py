@@ -8,8 +8,6 @@ import time
 import os
 import itertools
 import json
-from datetime import datetime, time as dt_time
-import pytz
 
 # ==========================================
 # 0. 頁面設定與初始化
@@ -52,10 +50,6 @@ if 'calc_base_price' not in st.session_state:
 if 'calc_view_price' not in st.session_state:
     st.session_state.calc_view_price = 100.0
 
-# 新增：已忽略(刪除)的股票清單
-if 'ignored_stocks' not in st.session_state:
-    st.session_state.ignored_stocks = set()
-
 # 優先從設定檔讀取
 saved_config = load_config()
 
@@ -85,23 +79,14 @@ with st.sidebar:
         key='limit_rows'
     )
     
-    col_save, col_reset = st.columns([1, 1])
-    with col_save:
-        if st.button("💾 儲存設定"):
-            if save_config(current_font_size, current_limit_rows):
-                st.toast("設定已儲存！", icon="✅")
-            else:
-                st.error("設定儲存失敗。")
-                
-    # 管理已忽略名單
-    st.markdown("---")
-    st.write(f"🚫 已忽略 **{len(st.session_state.ignored_stocks)}** 檔股票")
-    if st.button("🗑️ 清空已忽略名單"):
-        st.session_state.ignored_stocks.clear()
-        st.rerun()
+    if st.button("💾 儲存設定"):
+        if save_config(current_font_size, current_limit_rows):
+            st.toast("設定已儲存！下次開啟將自動套用。", icon="✅")
+        else:
+            st.error("設定儲存失敗。")
     
     st.caption("功能說明")
-    st.info("🗑️ **如何刪除股票？**\n\n在表格左側勾選並按 `Delete`，該股票下次分析時將不再出現。")
+    st.info("🗑️ **如何刪除股票？**\n\n勾選左側框框後按 `Delete` 鍵。")
 
 # --- 動態 CSS ---
 font_px = f"{st.session_state.font_size}px"
@@ -124,6 +109,11 @@ st.markdown(f"""
     
     div[data-testid="stDataFrame"] {{
         width: 100%;
+    }}
+    
+    /* 計算機頁面特定樣式 */
+    [data-testid="stMetricValue"] {{
+        font-size: 1.2em;
     }}
     
     /* 隱藏索引列 */
@@ -267,20 +257,9 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             ticker = yf.Ticker(f"{code}.TWO")
             hist = ticker.history(period="3mo")
         if hist.empty: 
-            st.error(f"⚠️ 代號 {code}: 抓取無資料。")
+            # st.error(f"⚠️ 代號 {code}: 抓取無資料。")
             return None
 
-        tz = pytz.timezone('Asia/Taipei')
-        now = datetime.now(tz)
-        last_date = hist.index[-1].date()
-        
-        is_today_data = (last_date == now.date())
-        is_during_trading = (now.time() < dt_time(13, 45))
-        
-        if is_today_data and is_during_trading:
-            if len(hist) > 1:
-                hist = hist.iloc[:-1]
-        
         today = hist.iloc[-1]
         current_price = today['Close']
         
@@ -294,12 +273,15 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
 
         pct_change = ((current_price - prev_day['Close']) / prev_day['Close']) * 100
         
+        # 1. 欄位顯示用的數據 (以收盤價為基準)
         target_price = apply_tick_rules(current_price * 1.03)
         stop_price = apply_tick_rules(current_price * 0.97)
         limit_up_col, limit_down_col = calculate_limits(current_price) 
 
+        # 2. 戰略備註用的漲跌停參考 (以昨日收盤為基準)
         limit_up_today, limit_down_today = calculate_limits(prev_day['Close'])
 
+        # 點位收集
         points = []
         ma5 = apply_tick_rules(hist['Close'].tail(5).mean())
         points.append({"val": ma5, "tag": "多" if current_price > ma5 else "空"})
@@ -321,14 +303,17 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         points.append({"val": high_90, "tag": "高"})
         points.append({"val": low_90, "tag": "低"})
 
+        # 戰略備註整理
         display_candidates = []
         for p in points:
             v = float(f"{p['val']:.2f}")
+            # 備註過濾邏輯：確保顯示的點位不超過收盤價預測的漲跌停範圍
             is_in_range = limit_down_col <= v <= limit_up_col
             is_5ma = "多" in p['tag'] or "空" in p['tag']
             if is_in_range or is_5ma:
                 display_candidates.append({"val": v, "tag": p['tag']})
         
+        # 檢查是否觸及今日漲跌停 (基於昨日收盤價)
         touched_up = today['High'] >= limit_up_today - 0.01
         touched_down = today['Low'] <= limit_down_today + 0.01
 
@@ -354,6 +339,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             
             is_close_price = abs(val - current_price) < 0.01
             
+            # --- 漲停高/跌停低 + 延伸計算 ---
             if is_limit_up:
                 if is_high and is_close_price: 
                     final_tag = "漲停高"
@@ -399,13 +385,15 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         
         strategy_note = "-".join(note_parts)
         
-        light = "⚪"
-        if "多" in strategy_note: light = "🔴"
-        elif "空" in strategy_note: light = "🟢"
-        
+        # _points 只包含 final_display_points
         full_calc_points = final_display_points
         
         final_name = name_hint if name_hint else get_stock_name_online(code)
+        
+        # 加入燈號到名稱
+        light = "⚪"
+        if "多" in strategy_note: light = "🔴"
+        elif "空" in strategy_note: light = "🟢"
         final_name_display = f"{light} {final_name}"
         
         return {
@@ -445,6 +433,7 @@ with tab1:
             try:
                 if uploaded_file.name.endswith('.csv'):
                     xl = None 
+                    # CSV 強制 dtype=str
                     df_up = pd.read_csv(uploaded_file, dtype=str)
                 else:
                     import importlib.util
@@ -485,8 +474,11 @@ with tab1:
                             c_raw = str(row[c_col])
                             c = c_raw.split('.')[0].strip()
                             
-                            if c.isdigit():
-                                if len(c) <= 3: c = "00" + c
+                            # 3. 修正: 只要有內容就處理，不限純數字
+                            if c:
+                                # 僅對純數字且長度不足的進行補零 (修正 0050 問題)
+                                if c.isdigit():
+                                    if len(c) <= 3: c = "00" + c
                                 
                                 n = str(row[n_col]) if n_col else ""
                                 targets.append((c, n, 'upload', {}))
@@ -513,9 +505,6 @@ with tab1:
         total = len(targets)
         
         for i, (code, name, source, extra) in enumerate(targets):
-            # 修正：加入已忽略名單的過濾
-            if code in st.session_state.ignored_stocks: continue
-            
             if code in seen: continue
             if hide_etf and code.startswith("00"): continue
             
@@ -537,9 +526,6 @@ with tab1:
         rename_map = {"漲停價": "當日漲停價", "跌停價": "當日跌停價"}
         df_all = df_all.rename(columns=rename_map)
         
-        # 過濾已忽略的股票 (防止資料殘留)
-        df_all = df_all[~df_all['代號'].isin(st.session_state.ignored_stocks)]
-        
         if '_source' in df_all.columns:
             df_up = df_all[df_all['_source'] == 'upload'].head(limit)
             df_se = df_all[df_all['_source'] == 'search']
@@ -553,7 +539,6 @@ with tab1:
             if col not in df_display.columns and col != "_points":
                 df_display[col] = None
 
-        # 建立 DataFrame 顯示
         edited_df = st.data_editor(
             df_display[input_cols],
             column_config={
@@ -582,16 +567,6 @@ with tab1:
             key="main_editor"
         )
         
-        # 偵測刪除：比較 df_display 與 edited_df
-        if len(edited_df) < len(df_display):
-            # 找出被刪除的代號
-            current_codes = set(df_display['代號'])
-            remaining_codes = set(edited_df['代號'])
-            removed = current_codes - remaining_codes
-            if removed:
-                st.session_state.ignored_stocks.update(removed)
-                st.rerun() # 重新整理以更新狀態
-        
         results_hit = []
         for idx, row in edited_df.iterrows():
             custom_price = row['自訂價(可修)']
@@ -612,7 +587,12 @@ with tab1:
                         if isinstance(points, list):
                             for p in points:
                                 if abs(p['val'] - price) < 0.01:
-                                    hit_type = 'normal'
+                                    if "漲停" in p['tag']:
+                                        hit_type = 'up'
+                                    elif "跌停" in p['tag']:
+                                        hit_type = 'down'
+                                    else:
+                                        hit_type = 'normal'
                                     break
                 except:
                     pass
