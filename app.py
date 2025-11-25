@@ -619,8 +619,7 @@ with tab1:
         for col in input_cols:
             if col not in df_display.columns and col != "_points": df_display[col] = None
 
-        # [修改] 移除 st.form，使用直接輸入模式
-        # [修改] 自訂價和狀態欄位設定固定寬度，防止 UI 抖動
+        # [修改] 1. 移除 st.form，使用直接編輯模式
         edited_df = st.data_editor(
             df_display[input_cols],
             column_config={
@@ -643,34 +642,59 @@ with tab1:
             key="main_editor"
         )
         
+        # [修改] 2. 增加手動更新按鈕
+        col_btn, _ = st.columns([2, 8])
+        manual_update = col_btn.button("⚡ 立即更新狀態 (或輸入完最後一列自動更新)", use_container_width=True)
+        
+        # [修改] 3. 觸發更新邏輯：手動按鈕 OR 最後一列被編輯
+        should_update = False
+        
+        # 3.1 處理刪除的列
         if len(edited_df) < len(df_display):
             original = set(df_display['代號']); new = set(edited_df['代號'])
             removed = original - new
             if removed:
                 st.session_state.ignored_stocks.update(removed)
                 save_data_cache(st.session_state.stock_data, st.session_state.ignored_stocks)
-                # 這裡保留 rerun 以確保刪除後畫面正確
                 st.rerun()
+
+        # 3.2 偵測是否編輯最後一列
+        if len(edited_df) > 0:
+            last_idx = len(edited_df) - 1
+            last_price = edited_df.iloc[last_idx]['自訂價(可修)']
+            # 比較目前編輯器的值 vs 原始資料(Session State)的值
+            orig_last_price = df_display.iloc[last_idx]['自訂價(可修)']
+            
+            def is_diff(v1, v2):
+                s1 = str(v1).strip() if pd.notna(v1) else ""
+                s2 = str(v2).strip() if pd.notna(v2) else ""
+                return s1 != s2
+                
+            if is_diff(last_price, orig_last_price):
+                should_update = True
         
-        updated_rows = []
-        # [修改] 即時計算狀態並更新到 Session State，但不強制 rerun
-        for idx, row in edited_df.iterrows():
-            new_status = recalculate_row(row)
-            if new_status != row['狀態']:
+        if manual_update:
+            should_update = True
+            
+        if should_update:
+            updated_rows = []
+            for idx, row in edited_df.iterrows():
+                new_status = recalculate_row(row)
                 row['狀態'] = new_status
-            updated_rows.append(row)
+                updated_rows.append(row)
             
-        if updated_rows:
-            df_updated = pd.DataFrame(updated_rows)
-            update_map = df_updated.set_index('代號')[['自訂價(可修)', '狀態']].to_dict('index')
-            
-            for i, r in st.session_state.stock_data.iterrows():
-                code = r['代號']
-                if code in update_map:
-                    st.session_state.stock_data.at[i, '自訂價(可修)'] = update_map[code]['自訂價(可修)']
-                    st.session_state.stock_data.at[i, '狀態'] = update_map[code]['狀態']
-            # [重要] 這裡刻意不呼叫 st.rerun()，以保持輸入焦點順暢。
-            # 當你在輸入下一列時，前一列的狀態計算會在背景完成並於下一次畫面變動時顯示。
+            if updated_rows:
+                df_updated = pd.DataFrame(updated_rows)
+                update_map = df_updated.set_index('代號')[['自訂價(可修)', '狀態']].to_dict('index')
+                
+                for i, r in st.session_state.stock_data.iterrows():
+                    code = r['代號']
+                    if code in update_map:
+                        st.session_state.stock_data.at[i, '自訂價(可修)'] = update_map[code]['自訂價(可修)']
+                        st.session_state.stock_data.at[i, '狀態'] = update_map[code]['狀態']
+                
+                # 強制刷新顯示結果
+                st.rerun()
 
 # -------------------------------------------------------
 # Tab 2: 當沖損益試算
