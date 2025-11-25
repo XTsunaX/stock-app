@@ -101,7 +101,7 @@ with st.sidebar:
     current_font_size = st.slider(
         "字體大小 (表格)", 
         min_value=12, 
-        max_value=72, 
+        max_value=40, 
         key='font_size'
     )
     
@@ -124,6 +124,7 @@ with st.sidebar:
     st.markdown("### 資料管理")
     st.write(f"🚫 已忽略 **{len(st.session_state.ignored_stocks)}** 檔")
     
+    # 2. 按鈕改為上下排列
     if st.button("♻️ 復原忽略", use_container_width=True):
         st.session_state.ignored_stocks.clear()
         save_data_cache(st.session_state.stock_data, st.session_state.ignored_stocks)
@@ -291,20 +292,23 @@ def move_tick(price, steps):
     except:
         return price
 
+# [修正] 戰略備註寬度計算：加權並加大 Buffer
 def calculate_note_width(series, font_size):
     def get_width(s):
         w = 0
         for c in str(s):
-            w += 2.0 if ord(c) > 127 else 1.0
+            # 中文字寬度加權
+            w += 2.1 if ord(c) > 127 else 1.1
         return w
     
-    if series.empty: return 200
+    if series.empty: return 300
     max_w = series.apply(get_width).max()
-    if pd.isna(max_w): max_w = 10
-    pixel_width = int(max_w * (font_size * 0.6)) + 40
-    return max(200, min(pixel_width, 1600))
+    if pd.isna(max_w): max_w = 20
+    
+    # 字體大小 * 係數(0.7) + 固定Buffer(60)
+    pixel_width = int(max_w * (font_size * 0.7)) + 60
+    return max(300, min(pixel_width, 2000))
 
-# 修正：只回傳狀態，不更新獲利停損
 def recalculate_row(row):
     custom_price = row.get('自訂價(可修)')
     status = ""
@@ -349,7 +353,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         is_today_data = (last_date == now.date())
         is_during_trading = (now.time() < dt_time(13, 45))
         
-        # 盤中不更新：切掉今日資料
+        # 盤中不更新
         if is_today_data and is_during_trading and len(hist) > 1:
             hist = hist.iloc[:-1]
         
@@ -363,12 +367,10 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
 
         pct_change = ((current_price - prev_day['Close']) / prev_day['Close']) * 100
         
-        # 1. 獲利目標/停損：以 current_price (收盤價) 為基準，固定不變
         target_price = apply_tick_rules(current_price * 1.03)
         stop_price = apply_tick_rules(current_price * 0.97)
         limit_up_col, limit_down_col = calculate_limits(current_price) 
 
-        # 2. 戰略備註 (昨日收盤基準)
         limit_up_today, limit_down_today = calculate_limits(prev_day['Close'])
 
         points = []
@@ -465,7 +467,6 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         elif "空" in strategy_note: light = "🟢"
         final_name_display = f"{light} {final_name}"
         
-        # 直接使用欄位名稱：+3%, -3%
         return {
             "代號": code,
             "名稱": final_name_display, 
@@ -474,11 +475,11 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             "當日漲停價": limit_up_col,   
             "當日跌停價": limit_down_col,
             "自訂價(可修)": None, 
-            "+3%": target_price,  # 固定值
-            "-3%": stop_price,    # 固定值
-            "狀態": "", 
+            "獲利目標": target_price, 
+            "防守停損": stop_price,   
             "戰略備註": strategy_note,
-            "_points": full_calc_points
+            "_points": full_calc_points,
+            "狀態": ""
         }
     except: return None
 
@@ -614,6 +615,8 @@ with tab1:
         note_width_px = calculate_note_width(df_display['戰略備註'], current_font_size)
 
         input_cols = ["代號", "名稱", "戰略備註", "自訂價(可修)", "狀態", "當日漲停價", "當日跌停價", "+3%", "-3%", "收盤價", "漲跌幅", "_points"]
+        df_display = df_display.rename(columns={"獲利目標": "+3%", "防守停損": "-3%"})
+
         for col in input_cols:
             if col not in df_display.columns and col != "_points": df_display[col] = None
 
@@ -649,6 +652,7 @@ with tab1:
         
         updated_rows = []
         need_rerun = False
+        
         for idx, row in edited_df.iterrows():
             new_status = recalculate_row(row)
             if new_status != row['狀態']:
@@ -708,6 +712,7 @@ with tab2:
     for i in ticks_range:
         p = move_tick(view_p, i)
         if p > limit_up or p < limit_down: continue
+        
         if is_long:
             buy_price = base_p; sell_price = p
             buy_fee = max(min_fee, math.floor(buy_price * shares * fee_rate * (discount/10)))
