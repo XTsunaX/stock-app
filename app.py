@@ -362,7 +362,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
 
         pct_change = ((current_price - prev_day['Close']) / prev_day['Close']) * 100
         
-        # 目標與停損 (基於收盤價) -> +3% 和 -3% 價位
+        # 目標與停損 (基於收盤價)
         target_price = apply_tick_rules(current_price * 1.03)
         stop_price = apply_tick_rules(current_price * 0.97)
         
@@ -374,7 +374,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
 
         points = []
         
-        # 1. 5MA
+        # 1. 5MA (強制顯示)
         ma5_raw = hist['Close'].tail(5).mean()
         ma5 = apply_tick_rules(ma5_raw)
         
@@ -385,7 +385,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         
         points.append({"val": ma5, "tag": ma5_tag, "force": True})
 
-        # 2. 當日高低開
+        # 2. 當日/近期點位
         points.append({"val": apply_tick_rules(today['Open']), "tag": ""})
         points.append({"val": apply_tick_rules(today['High']), "tag": ""})
         points.append({"val": apply_tick_rules(today['Low']), "tag": ""})
@@ -399,30 +399,20 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             
         high_90 = apply_tick_rules(hist['High'].max())
         low_90 = apply_tick_rules(hist['Low'].min())
-
-        # 3. 近期高低點邏輯修正：若收盤價等於近期高/低，改為顯示 +/- 3% 價格
-        # 90日高
-        if abs(current_price - high_90) < 0.01:
-            # 收盤價是近期高點 -> 顯示 +3% 價格，標記漲停高
-            points.append({"val": target_price, "tag": "漲停高"})
-        else:
-            points.append({"val": high_90, "tag": "高"})
         
-        # 90日低
-        if abs(current_price - low_90) < 0.01:
-            # 收盤價是近期低點 -> 顯示 -3% 價格，標記跌停低
-            points.append({"val": stop_price, "tag": "跌停低"})
-        else:
-            points.append({"val": low_90, "tag": "低"})
+        # 3. 永遠加入高低點
+        points.append({"val": high_90, "tag": "高"})
+        points.append({"val": low_90, "tag": "低"})
 
-        # 4. 觸及漲跌停邏輯修正：改為加入 +/- 3% 價格
-        # 若今日觸及漲停
-        if today['High'] >= limit_up_today - 0.01:
-            points.append({"val": target_price, "tag": "漲停"})
+        # 4. 觸及漲跌停時，加入 +/- 3% 價格 (以收盤價推算)
+        touched_up = today['High'] >= limit_up_today - 0.01
+        touched_down = today['Low'] <= limit_down_today + 0.01
         
-        # 若今日觸及跌停
-        if today['Low'] <= limit_down_today + 0.01:
-            points.append({"val": stop_price, "tag": "跌停"})
+        if touched_up:
+            points.append({"val": target_price, "tag": ""})
+        
+        if touched_down:
+            points.append({"val": stop_price, "tag": ""})
             
         display_candidates = []
         for p in points:
@@ -439,21 +429,31 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             tags = [x['tag'] for x in g_list if x['tag']]
             
             final_tag = ""
-            is_close_price = abs(val - current_price) < 0.01
             
-            # 決定最終標籤
-            if "漲停高" in tags: final_tag = "漲停高"
-            elif "跌停低" in tags: final_tag = "跌停低"
-            elif "漲停" in tags: final_tag = "漲停"
-            elif "跌停" in tags: final_tag = "跌停"
+            # 判斷特殊標籤
+            is_limit_up = (abs(val - limit_up_today) < 0.01) and touched_up
+            is_limit_down = (abs(val - limit_down_today) < 0.01) and touched_down
+            is_high = abs(val - high_90) < 0.01
+            is_low = abs(val - low_90) < 0.01
+            is_close = abs(val - current_price) < 0.01
+            
+            # 優先權邏輯修正
+            if is_limit_up and is_high and is_close:
+                final_tag = "漲停高"
+            elif is_limit_down and is_low and is_close:
+                final_tag = "跌停低"
+            elif is_limit_up:
+                final_tag = "漲停"
+            elif is_limit_down:
+                final_tag = "跌停"
             else:
-                if "高" in tags: final_tag = "高"
-                elif "低" in tags: final_tag = "低"
+                if is_high: final_tag = "高"
+                elif is_low: final_tag = "低"
                 elif "多" in tags: final_tag = "多"
                 elif "空" in tags: final_tag = "空"
                 elif "平" in tags: final_tag = "平"
             
-            # 5MA 補償顯示：若被高低點蓋掉，盡量保留多空資訊 (非強制，視需求)
+            # 5MA 補償 (若被高低點蓋掉，仍希望能看到多空資訊，但若已是漲停高則不顯示多空以免太長)
             if ("多" in tags or "空" in tags or "平" in tags) and final_tag not in ["漲停", "跌停", "漲停高", "跌停低"]:
                 if "多" in tags: final_tag = "多"
                 elif "空" in tags: final_tag = "空"
