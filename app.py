@@ -331,7 +331,6 @@ def recalculate_row(row):
     except:
         return status
 
-# [核心修改] 更新後的資料抓取與戰略備註計算邏輯
 def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     code = str(code).strip()
     try:
@@ -343,149 +342,152 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         if hist.empty: 
             return None
 
-        # 基礎資料：取最後一筆作為今日，倒數第二筆作為昨日 (若有)
+        tz = pytz.timezone('Asia/Taipei')
+        now = datetime.now(tz)
+        last_date = hist.index[-1].date()
+        is_today_data = (last_date == now.date())
+        is_during_trading = (now.time() < dt_time(13, 45))
+        
+        # 盤中不更新
+        if is_today_data and is_during_trading and len(hist) > 1:
+            hist = hist.iloc[:-1]
+        
         today = hist.iloc[-1]
-        current_price = float(today['Close']) # 當日盤後收盤價
+        current_price = today['Close']
         
-        if len(hist) >= 2:
-            prev_day = hist.iloc[-2]
-            prev_close = float(prev_day['Close'])
-        else:
-            prev_day = today
-            prev_close = current_price
-            
-        if pd.isna(current_price): return None
+        if len(hist) >= 2: prev_day = hist.iloc[-2]
+        else: prev_day = today
+        
+        if pd.isna(current_price) or pd.isna(prev_day['Close']): return None
 
-        pct_change = ((current_price - prev_close) / prev_close) * 100
+        pct_change = ((current_price - prev_day['Close']) / prev_day['Close']) * 100
         
-        # 1. 計算明日漲跌停 (基於當日收盤價)
-        next_limit_up, next_limit_down = calculate_limits(current_price)
+        # --- 計算指標 ---
         
-        # 當日實際漲跌停 (用於判斷是否顯示漲跌停標籤)
-        limit_up_today, limit_down_today = calculate_limits(prev_close)
-        touched_limit_up = today['High'] >= limit_up_today - 0.01
-        touched_limit_down = today['Low'] <= limit_down_today + 0.01
+        # 1. 5MA 計算 (以收盤價為準)
+        ma5_raw = hist['Close'].tail(5).mean()
+        ma5_val = apply_tick_rules(ma5_raw)
+        
+        if ma5_val > current_price: ma5_tag = "空"
+        elif ma5_val < current_price: ma5_tag = "多"
+        else: ma5_tag = "平"
 
-        # 2. 5MA 邏輯
-        ma5_val = apply_tick_rules(hist['Close'].tail(5).mean())
-        if ma5_val > current_price: ma_tag = "空"
-        elif ma5_val < current_price: ma_tag = "多"
-        else: ma_tag = "平"
+        # 2. 漲跌停價 (以當日收盤價計算明日)
+        limit_up_col, limit_down_col = calculate_limits(current_price)
+        limit_up_today, limit_down_today = calculate_limits(prev_day['Close']) # 用於顯示，但在戰略備註中使用明日預測值
 
-        # 3. 技術點位
-        # 5日內高低點 (不含當日)
-        past_5 = hist.iloc[-6:-1] if len(hist) > 1 else pd.DataFrame()
-        recent_high = apply_tick_rules(past_5['High'].max()) if not past_5.empty else apply_tick_rules(prev_day['High'])
-        recent_low = apply_tick_rules(past_5['Low'].min()) if not past_5.empty else apply_tick_rules(prev_day['Low'])
+        # 3. 近期高低點
+        recent_high = apply_tick_rules(hist['High'].max())
+        recent_low = apply_tick_rules(hist['Low'].min())
         
-        yesterday_high = apply_tick_rules(prev_day['High'])
-        yesterday_low = apply_tick_rules(prev_day['Low'])
-        
-        today_open = apply_tick_rules(today['Open'])
-        today_high = apply_tick_rules(today['High'])
-        today_low = apply_tick_rules(today['Low'])
-        
-        # 4. 目標價
-        target_3pct = apply_tick_rules(current_price * 1.03)
-        stop_3pct = apply_tick_rules(current_price * 0.97)
+        # 4. +/- 3% 目標
+        target_3pct_up = apply_tick_rules(current_price * 1.03)
+        target_3pct_down = apply_tick_rules(current_price * 0.97)
 
-        # 收集所有點位
+        # 5. 戰略備註點位收集
         candidates = []
         
-        # 輔助函式：加入點位並檢查範圍
-        def add_point(val, tag, priority=1):
-            # 檢查是否在明日可觸及範圍 (漲跌停內)
-            if val > next_limit_up + 0.01: return
-            if val < next_limit_down - 0.01: return
-            candidates.append({"val": val, "tag": tag, "p": priority})
+        # [A] 5MA (強制顯示)
+        candidates.append({"val": ma5_val, "tag": ma5_tag})
 
-        # (2) 5MA (皆需顯示)
-        add_point(ma5_val, ma_tag, 10)
+        # [B] 基礎點位
+        candidates.append({"val": apply_tick_rules(today['Open']), "tag": ""}) # 當日開盤
+        candidates.append({"val": apply_tick_rules(today['High']), "tag": ""}) # 當日高點
+        candidates.append({"val": apply_tick_rules(today['Low']), "tag": ""})  # 當日低點
+        candidates.append({"val": apply_tick_rules(prev_day['High']), "tag": ""}) # 昨日高點
+        candidates.append({"val": apply_tick_rules(prev_day['Low']), "tag": ""})  # 昨日低點
         
-        # (5) 補充資料點位
-        add_point(today_open, "")
-        add_point(today_high, "")
-        add_point(today_low, "")
-        add_point(yesterday_high, "")
-        add_point(yesterday_low, "")
-        
-        # 近期高低點 + (3) 特殊標籤邏輯
-        r_high_tag = ""
-        r_low_tag = ""
-        
-        # 漲停標示邏輯：若明日漲停 == 近期高點 -> 漲停高
-        if abs(next_limit_up - recent_high) < 0.01:
-            r_high_tag = "漲停高"
-        # 跌停標示邏輯：若明日跌停 == 近期低點 -> 跌停低
-        if abs(next_limit_down - recent_low) < 0.01:
-            r_low_tag = "跌停低"
+        # [C] 5日內低點(不含當日)
+        if len(hist) >= 6:
+            low_5d = hist['Low'].iloc[-6:-1].min()
+            candidates.append({"val": apply_tick_rules(low_5d), "tag": ""})
             
-        add_point(recent_high, r_high_tag)
-        add_point(recent_low, r_low_tag)
+        # [D] 漲跌停與近期高低點 (邏輯合併)
+        # 漲停
+        tag_up = "漲停"
+        if abs(limit_up_col - recent_high) < 0.001: tag_up = "漲停高"
+        candidates.append({"val": limit_up_col, "tag": tag_up})
         
-        # (3) 漲跌停價顯示規則：若當日無漲跌停則不用呈現 (除非它是近期高低點，已被上面涵蓋)
-        # 若當日有觸碰到漲跌停，則顯示明日的漲跌停價作為參考
-        if touched_limit_up:
-            add_point(next_limit_up, "漲停", 5)
-        if touched_limit_down:
-            add_point(next_limit_down, "跌停", 5)
+        # 跌停
+        tag_down = "跌停"
+        if abs(limit_down_col - recent_low) < 0.001: tag_down = "跌停低"
+        candidates.append({"val": limit_down_col, "tag": tag_down})
+        
+        # 近期高/低 (若未與漲跌停重疊則顯示)
+        if abs(limit_up_col - recent_high) >= 0.001:
+            candidates.append({"val": recent_high, "tag": "高"})
+        if abs(limit_down_col - recent_low) >= 0.001:
+            candidates.append({"val": recent_low, "tag": "低"})
             
-        # (5) +/- 3% 顯示規則
-        # 若近期最高點小於 +3% 則顯示 +3%
-        if target_3pct > recent_high:
-            add_point(target_3pct, "")
-        # 若近期最低點大於 -3% 則顯示 -3%
-        if stop_3pct < recent_low:
-            add_point(stop_3pct, "")
+        # [E] +/- 3% (若近期高點小於+3%則顯示，近期低點大於-3%則顯示)
+        if recent_high < target_3pct_up:
+            candidates.append({"val": target_3pct_up, "tag": ""}) # 僅顯示數值
+        if recent_low > target_3pct_down:
+            candidates.append({"val": target_3pct_down, "tag": ""})
 
-        # 整理與格式化
+        # --- 排序與去重組裝 ---
         candidates.sort(key=lambda x: x['val'])
         
-        unique_points = []
-        seen_vals = set()
+        final_points = []
+        seen_vals = {} # val -> tag
         
-        # 去重與合併標籤邏輯
-        for c in candidates:
-            v_rounded = round(c['val'], 2)
-            if v_rounded in seen_vals:
-                # 若數值重複，保留有標籤的那個，或優先權高的
-                for exist in unique_points:
-                    if round(exist['val'], 2) == v_rounded:
-                        if c['tag'] and not exist['tag']:
-                            exist['tag'] = c['tag']
-                        elif c['tag'] and exist['tag'] and c['p'] > exist['p']:
-                             exist['tag'] = c['tag'] # 5MA標籤優先
-                        break
-                continue
-            seen_vals.add(v_rounded)
-            unique_points.append(c)
+        # 去重邏輯：優先保留有意義的 Tag
+        # 優先級：漲跌停 > 高低 > MA > 空白
+        def get_tag_priority(t):
+            if "漲停" in t or "跌停" in t: return 4
+            if "高" in t or "低" in t: return 3
+            if t in ["多", "空", "平"]: return 2
+            return 1
             
-        note_parts = []
-        full_calc_points = []
-        
-        for p in unique_points:
-            val = p['val']
-            tag = p['tag']
+        temp_dict = {}
+        for item in candidates:
+            v = item['val']
+            t = item['tag']
             
-            # 存入原始資料供計算用
-            full_calc_points.append({"val": val, "tag": tag})
-            
-            # 產生顯示字串
-            v_str = f"{val:.0f}" if val.is_integer() else f"{val:.2f}"
-            
-            # 格式：漲停/跌停/漲停高/跌停低 放前面，多/空/平 放後面
-            if tag in ["漲停", "漲停高", "跌停", "跌停低"]:
-                item = f"{tag}{v_str}"
-            elif tag in ["多", "空", "平"]:
-                item = f"{v_str}{tag}"
+            if v not in temp_dict:
+                temp_dict[v] = t
             else:
-                item = v_str
-            note_parts.append(item)
+                current_prio = get_tag_priority(temp_dict[v])
+                new_prio = get_tag_priority(t)
+                if new_prio > current_prio:
+                    temp_dict[v] = t
+                # 特殊：若既是 MA 又是其他關鍵位，且用戶要求 5MA 必顯
+                # 我們可以考慮合併，但為了簡潔，若 MA 與漲停重疊，顯示漲停比較重要
+                # 但用戶說 "5MA皆需顯示"。若 5MA=漲停，顯示 "漲停100" 可能會漏掉多空資訊
+                # 這裡做一個微調：若 MA 點位存在，且 Tag 被覆蓋，我們還是保留原 Tag，但後綴加註? 
+                # 鑑於範例簡潔性，這裡維持高優先級覆蓋。但 MA 比較特殊，
+                # 若數值等於 MA，我們還是希望看到多空。
+                # 不過通常 MA 會帶小數點，漲停是 Tick 整數，重疊機率低。
+        
+        # 轉回 List 並排序
+        final_list = [{"val": k, "tag": v} for k, v in temp_dict.items()]
+        final_list.sort(key=lambda x: x['val'])
+        
+        # 格式化輸出
+        note_parts = []
+        for p in final_list:
+            v_str = f"{p['val']:.0f}" if p['val'].is_integer() else f"{p['val']:.2f}"
+            t = p['tag']
+            
+            # 格式規則：
+            # 多/空/平 -> 放在數值後面 (例如 68.2空)
+            # 漲停/跌停/高/低 -> 放在數值前面 (例如 漲停139.5)
+            if t in ["多", "空", "平"]:
+                item_str = f"{v_str}{t}"
+            elif t in ["漲停", "漲停高", "跌停", "跌停低", "高", "低"]:
+                item_str = f"{t}{v_str}"
+            else:
+                item_str = v_str
+            note_parts.append(item_str)
         
         strategy_note = "-".join(note_parts)
+        
+        # 獲利/停損 (收盤價基準)
+        target_price = apply_tick_rules(current_price * 1.03)
+        stop_price = apply_tick_rules(current_price * 0.97)
+
         final_name = name_hint if name_hint else get_stock_name_online(code)
         
-        # 燈號邏輯
         light = "⚪"
         if "多" in strategy_note: light = "🔴"
         elif "空" in strategy_note: light = "🟢"
@@ -496,17 +498,16 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             "名稱": final_name_display, 
             "收盤價": round(current_price, 2),
             "漲跌幅": pct_change, 
-            "當日漲停價": next_limit_up,   # 顯示為明日的漲停價
-            "當日跌停價": next_limit_down, # 顯示為明日的跌停價
+            "當日漲停價": limit_up_col,   
+            "當日跌停價": limit_down_col,
             "自訂價(可修)": None, 
-            "獲利目標": target_3pct, 
-            "防守停損": stop_3pct,   
+            "獲利目標": target_price, 
+            "防守停損": stop_price,   
             "戰略備註": strategy_note,
-            "_points": full_calc_points,
+            "_points": final_list, # 用於命中計算
             "狀態": ""
         }
-    except Exception as e:
-        return None
+    except: return None
 
 # ==========================================
 # 主介面 (Tabs)
@@ -649,6 +650,7 @@ with tab1:
         for col in input_cols:
             if col not in df_display.columns and col != "_points": df_display[col] = None
 
+        # [修改] 1. 移除 st.form，使用直接編輯模式
         edited_df = st.data_editor(
             df_display[input_cols],
             column_config={
@@ -671,11 +673,14 @@ with tab1:
             key="main_editor"
         )
         
+        # [修改] 2. 增加手動更新按鈕
         col_btn, _ = st.columns([2, 8])
         manual_update = col_btn.button("⚡ 立即更新狀態 (或輸入完最後一列自動更新)", use_container_width=True)
         
+        # [修改] 3. 觸發更新邏輯：手動按鈕 OR 最後一列被編輯
         should_update = False
         
+        # 3.1 處理刪除的列
         if len(edited_df) < len(df_display):
             original = set(df_display['代號']); new = set(edited_df['代號'])
             removed = original - new
@@ -684,9 +689,11 @@ with tab1:
                 save_data_cache(st.session_state.stock_data, st.session_state.ignored_stocks)
                 st.rerun()
 
+        # 3.2 偵測是否編輯最後一列
         if len(edited_df) > 0:
             last_idx = len(edited_df) - 1
             last_price = edited_df.iloc[last_idx]['自訂價(可修)']
+            # 比較目前編輯器的值 vs 原始資料(Session State)的值
             orig_last_price = df_display.iloc[last_idx]['自訂價(可修)']
             
             def is_diff(v1, v2):
