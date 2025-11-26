@@ -372,14 +372,27 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
 
         points = []
         
-        # 1. 5MA (強制顯示)
+        # 1. 5MA 邏輯更新 (靠攏收盤價)
         ma5_raw = hist['Close'].tail(5).mean()
-        ma5 = apply_tick_rules(ma5_raw)
         
-        ma5_tag = ""
-        if ma5 > current_price: ma5_tag = "空"
-        elif ma5 < current_price: ma5_tag = "多"
-        else: ma5_tag = "平"
+        # 根據 MA 值本身取得跳動檔位
+        tick_ma = get_tick_size(ma5_raw)
+        
+        if ma5_raw < current_price:
+            # 5MA 在下方 (支撐) -> 無條件進位 (Ceiling) 靠近收盤價
+            d_val = Decimal(str(ma5_raw))
+            d_tick = Decimal(str(tick_ma))
+            ma5 = float(math.ceil(d_val / d_tick) * d_tick)
+            ma5_tag = "多"
+        elif ma5_raw > current_price:
+            # 5MA 在上方 (壓力) -> 無條件捨去 (Floor) 靠近收盤價
+            d_val = Decimal(str(ma5_raw))
+            d_tick = Decimal(str(tick_ma))
+            ma5 = float(math.floor(d_val / d_tick) * d_tick)
+            ma5_tag = "空"
+        else:
+            ma5 = apply_tick_rules(ma5_raw)
+            ma5_tag = "平"
         
         points.append({"val": ma5, "tag": ma5_tag, "force": True})
 
@@ -403,7 +416,6 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         high_90 = apply_tick_rules(hist['High'].max())
         low_90 = apply_tick_rules(hist['Low'].min())
         
-        # 加入高低點
         points.append({"val": high_90, "tag": "高"})
         points.append({"val": low_90, "tag": "低"})
 
@@ -411,15 +423,15 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         touched_up = today['High'] >= limit_up_today - 0.01
         touched_down = today['Low'] <= limit_down_today + 0.01
         
-        # [修改] 只有當目標價 > 近期高點 時，才顯示目標價 (突破前高)
+        # 只有當目標價 > 近期高點 時，才顯示目標價 (突破前高)
         if target_price > high_90:
             points.append({"val": target_price, "tag": ""})
 
-        # [修改] 只有當停損價 < 近期低點 時，才顯示停損價 (跌破前低)
+        # 只有當停損價 < 近期低點 時，才顯示停損價 (跌破前低)
         if stop_price < low_90:
             points.append({"val": stop_price, "tag": ""})
 
-        # [修改] 若盤中觸及漲跌停，直接加入漲跌停價
+        # 若盤中觸及漲跌停，直接加入漲跌停價
         if touched_up:
             points.append({"val": limit_up_today, "tag": "漲停"})
         
@@ -443,7 +455,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             
             final_tag = ""
             
-            # [修改] 標籤合併：漲停+高=漲停高, 跌停+低=跌停低
+            # 標籤合併：漲停+高=漲停高, 跌停+低=跌停低
             has_limit_up = "漲停" in tags
             has_limit_down = "跌停" in tags
             has_high = "高" in tags
