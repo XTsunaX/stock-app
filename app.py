@@ -291,6 +291,33 @@ def move_tick(price, steps):
     except:
         return price
 
+# [修改] 支撐壓力計算邏輯 (與 5MA 相同)
+def apply_sr_rules(price, base_price):
+    """
+    支撐/壓力計算規則：
+    - 若價格 < 基準價 (下方/支撐)：無條件進位 (Ceil)，靠近收盤價
+    - 若價格 > 基準價 (上方/壓力)：無條件捨去 (Floor)，靠近收盤價
+    """
+    try:
+        p = float(price)
+        if math.isnan(p): return 0.0
+        
+        tick = get_tick_size(p)
+        d_val = Decimal(str(p))
+        d_tick = Decimal(str(tick))
+        
+        if p < base_price:
+            # 在下方 -> 支撐 -> 進位 (往上靠近)
+            return float(math.ceil(d_val / d_tick) * d_tick)
+        elif p > base_price:
+            # 在上方 -> 壓力 -> 捨去 (往下靠近)
+            return float(math.floor(d_val / d_tick) * d_tick)
+        else:
+            return apply_tick_rules(p)
+    except:
+        return price
+
+# [修改] 極致緊縮的寬度計算，移除所有空白
 def calculate_note_width(series, font_size):
     def get_width(s):
         w = 0
@@ -302,7 +329,8 @@ def calculate_note_width(series, font_size):
     max_w = series.apply(get_width).max()
     if pd.isna(max_w): max_w = 0
     
-    pixel_width = int(max_w * (font_size * 0.52)) + 10
+    # 緊縮係數調整為 0.5，並且不加額外 padding
+    pixel_width = int(max_w * (font_size * 0.5))
     return max(50, pixel_width)
 
 def recalculate_row(row):
@@ -349,7 +377,6 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         is_today_data = (last_date == now.date())
         is_during_trading = (now.time() < dt_time(13, 45))
         
-        # 盤中不更新
         if is_today_data and is_during_trading and len(hist) > 1:
             hist = hist.iloc[:-1]
         
@@ -363,36 +390,25 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
 
         pct_change = ((current_price - prev_day['Close']) / prev_day['Close']) * 100
         
-        # 目標 (+3%) 與 停損 (-3%)
-        target_price = apply_tick_rules(current_price * 1.03)
-        stop_price = apply_tick_rules(current_price * 0.97)
+        # [修改] 目標 (+3%) 與 停損 (-3%) 改用新的支撐壓力規則
+        target_raw = current_price * 1.03
+        stop_raw = current_price * 0.97
+        target_price = apply_sr_rules(target_raw, current_price)
+        stop_price = apply_sr_rules(stop_raw, current_price)
         
         limit_up_next, limit_down_next = calculate_limits(current_price) 
         limit_up_today, limit_down_today = calculate_limits(prev_day['Close'])
 
         points = []
         
-        # 1. 5MA 邏輯更新 (靠攏收盤價)
+        # 1. 5MA (使用 apply_sr_rules)
         ma5_raw = hist['Close'].tail(5).mean()
+        ma5 = apply_sr_rules(ma5_raw, current_price)
         
-        # 根據 MA 值本身取得跳動檔位
-        tick_ma = get_tick_size(ma5_raw)
-        
-        if ma5_raw < current_price:
-            # 5MA 在下方 (支撐) -> 無條件進位 (Ceiling) 靠近收盤價
-            d_val = Decimal(str(ma5_raw))
-            d_tick = Decimal(str(tick_ma))
-            ma5 = float(math.ceil(d_val / d_tick) * d_tick)
-            ma5_tag = "多"
-        elif ma5_raw > current_price:
-            # 5MA 在上方 (壓力) -> 無條件捨去 (Floor) 靠近收盤價
-            d_val = Decimal(str(ma5_raw))
-            d_tick = Decimal(str(tick_ma))
-            ma5 = float(math.floor(d_val / d_tick) * d_tick)
-            ma5_tag = "空"
-        else:
-            ma5 = apply_tick_rules(ma5_raw)
-            ma5_tag = "平"
+        ma5_tag = ""
+        if ma5_raw > current_price: ma5_tag = "空"
+        elif ma5_raw < current_price: ma5_tag = "多"
+        else: ma5_tag = "平"
         
         points.append({"val": ma5, "tag": ma5_tag, "force": True})
 
@@ -423,15 +439,12 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         touched_up = today['High'] >= limit_up_today - 0.01
         touched_down = today['Low'] <= limit_down_today + 0.01
         
-        # 只有當目標價 > 近期高點 時，才顯示目標價 (突破前高)
         if target_price > high_90:
             points.append({"val": target_price, "tag": ""})
 
-        # 只有當停損價 < 近期低點 時，才顯示停損價 (跌破前低)
         if stop_price < low_90:
             points.append({"val": stop_price, "tag": ""})
 
-        # 若盤中觸及漲跌停，直接加入漲跌停價
         if touched_up:
             points.append({"val": limit_up_today, "tag": "漲停"})
         
@@ -447,7 +460,6 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             
         display_candidates.sort(key=lambda x: x['val'])
         
-        # 合併與標籤邏輯
         final_display_points = []
         for val, group in itertools.groupby(display_candidates, key=lambda x: round(x['val'], 2)):
             g_list = list(group)
@@ -455,7 +467,6 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             
             final_tag = ""
             
-            # 標籤合併：漲停+高=漲停高, 跌停+低=跌停低
             has_limit_up = "漲停" in tags
             has_limit_down = "跌停" in tags
             has_high = "高" in tags
@@ -472,7 +483,6 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
                 elif "空" in tags: final_tag = "空"
                 elif "平" in tags: final_tag = "平"
             
-            # 5MA 補償顯示
             if ("多" in tags or "空" in tags or "平" in tags) and final_tag not in ["漲停", "跌停", "漲停高", "跌停低"]:
                 if "多" in tags: final_tag = "多"
                 elif "空" in tags: final_tag = "空"
@@ -483,7 +493,6 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         note_parts = []
         seen_vals = set() 
         for p in final_display_points:
-            # 簡單去重
             if p['val'] in seen_vals and p['tag'] == "": continue
             seen_vals.add(p['val'])
             
@@ -803,10 +812,29 @@ with tab2:
         note_type = ""
         if abs(p - limit_up) < 0.001: note_type = "up"
         elif abs(p - limit_down) < 0.001: note_type = "down"
-        calc_data.append({"成交價": f"{p:.2f}", "漲跌": diff_str, "預估損益": int(profit), "報酬率%": f"{roi:+.2f}%", "手續費": int(total_fee), "交易稅": int(tax), "_profit": profit, "_note_type": note_type})
+        
+        # [修改] 標記基準價
+        is_base = (i == 0)
+        
+        calc_data.append({
+            "成交價": f"{p:.2f}", 
+            "漲跌": diff_str, 
+            "預估損益": int(profit), 
+            "報酬率%": f"{roi:+.2f}%", 
+            "手續費": int(total_fee), 
+            "交易稅": int(tax), 
+            "_profit": profit, 
+            "_note_type": note_type,
+            "_is_base": is_base
+        })
         
     df_calc = pd.DataFrame(calc_data)
+    
+    # [修改] 表格樣式：增加基準價標示
     def style_calc_row(row):
+        if row['_is_base']:
+            return ['background-color: #ffffcc; color: black; font-weight: bold; border: 2px solid #ffd700;'] * len(row)
+            
         nt = row['_note_type']
         if nt == 'up': return ['background-color: #ff4b4b; color: white; font-weight: bold'] * len(row)
         elif nt == 'down': return ['background-color: #00cc00; color: white; font-weight: bold'] * len(row)
@@ -816,4 +844,15 @@ with tab2:
         else: return ['color: gray'] * len(row)
 
     if not df_calc.empty:
-        st.dataframe(df_calc.style.apply(style_calc_row, axis=1), use_container_width=False, hide_index=True, column_config={"_profit": None, "_note_type": None})
+        # [修改] 動態計算表格高度：(行數 + header) * 行高 + padding
+        row_height = 35
+        header_height = 40
+        table_height = (len(df_calc) + 1) * row_height 
+        
+        st.dataframe(
+            df_calc.style.apply(style_calc_row, axis=1), 
+            use_container_width=False, 
+            hide_index=True, 
+            height=table_height,
+            column_config={"_profit": None, "_note_type": None, "_is_base": None}
+        )
