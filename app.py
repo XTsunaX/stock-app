@@ -309,7 +309,6 @@ def apply_sr_rules(price, base_price):
     except:
         return price
 
-# [修改] 寬度係數從 0.42 調整為 0.44
 def calculate_note_width(series, font_size):
     def get_width(s):
         w = 0
@@ -321,8 +320,7 @@ def calculate_note_width(series, font_size):
     max_w = series.apply(get_width).max()
     if pd.isna(max_w): max_w = 0
     
-    # 係數調整為 0.44
-    pixel_width = int(max_w * (font_size * 0.44))
+    pixel_width = int(max_w * (font_size * 0.43))
     return max(50, pixel_width)
 
 def recalculate_row(row):
@@ -407,7 +405,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         points.append({"val": apply_tick_rules(today['Open']), "tag": ""})
         points.append({"val": apply_tick_rules(today['High']), "tag": ""})
         points.append({"val": apply_tick_rules(today['Low']), "tag": ""})
-        # [修改] 移除了昨日開盤價 prev_day['Open']，除非它等於高低點 (由下面兩行涵蓋)
+        
         points.append({"val": apply_tick_rules(prev_day['High']), "tag": ""})
         points.append({"val": apply_tick_rules(prev_day['Low']), "tag": ""})
         
@@ -451,6 +449,10 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             
         display_candidates.sort(key=lambda x: x['val'])
         
+        # [修改] 格式化函數：去除多餘的 .00
+        def fmt_v(v):
+            return f"{v:.2f}".rstrip('0').rstrip('.')
+
         final_display_points = []
         for val, group in itertools.groupby(display_candidates, key=lambda x: round(x['val'], 2)):
             g_list = list(group)
@@ -487,7 +489,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             if p['val'] in seen_vals and p['tag'] == "": continue
             seen_vals.add(p['val'])
             
-            v_str = f"{p['val']:.0f}" if p['val'].is_integer() else f"{p['val']:.2f}"
+            v_str = fmt_v(p['val'])
             t = p['tag']
             
             if t in ["漲停", "漲停高", "跌停", "跌停低", "高", "低"]: 
