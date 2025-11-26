@@ -363,16 +363,16 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
 
         pct_change = ((current_price - prev_day['Close']) / prev_day['Close']) * 100
         
+        # 目標 (+3%) 與 停損 (-3%)
         target_price = apply_tick_rules(current_price * 1.03)
         stop_price = apply_tick_rules(current_price * 0.97)
         
         limit_up_next, limit_down_next = calculate_limits(current_price) 
-        
         limit_up_today, limit_down_today = calculate_limits(prev_day['Close'])
 
         points = []
         
-        # 1. 5MA
+        # 1. 5MA (強制顯示)
         ma5_raw = hist['Close'].tail(5).mean()
         ma5 = apply_tick_rules(ma5_raw)
         
@@ -383,58 +383,47 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         
         points.append({"val": ma5, "tag": ma5_tag, "force": True})
 
-        # 2. 當日高低開
+        # 2. 當日 & 昨日 關鍵點
         points.append({"val": apply_tick_rules(today['Open']), "tag": ""})
         points.append({"val": apply_tick_rules(today['High']), "tag": ""})
         points.append({"val": apply_tick_rules(today['Low']), "tag": ""})
-        
-        # [新增] 額外加入「前一日」(昨) 的高低點，以捕捉如 "前天高點" 等關鍵位
+        points.append({"val": apply_tick_rules(prev_day['Open']), "tag": ""})
         points.append({"val": apply_tick_rules(prev_day['High']), "tag": ""})
         points.append({"val": apply_tick_rules(prev_day['Low']), "tag": ""})
         
+        # 3. 近5日高低
         if len(hist) >= 6: past_5 = hist.iloc[-6:-1]
         else: past_5 = hist.iloc[:-1]
             
         if not past_5.empty:
             points.append({"val": apply_tick_rules(past_5['High'].max()), "tag": ""})
             points.append({"val": apply_tick_rules(past_5['Low'].min()), "tag": ""})
-            
+        
+        # 4. 近期高低 (90日)
         high_90 = apply_tick_rules(hist['High'].max())
         low_90 = apply_tick_rules(hist['Low'].min())
         
+        # 加入高低點
+        points.append({"val": high_90, "tag": "高"})
+        points.append({"val": low_90, "tag": "低"})
+
+        # 5. 判斷觸及與是否過高/破低
         touched_up = today['High'] >= limit_up_today - 0.01
         touched_down = today['Low'] <= limit_down_today + 0.01
         
-        cond_limit_up_high = touched_up and (abs(current_price - high_90) < 0.01)
-        cond_limit_down_low = touched_down and (abs(current_price - low_90) < 0.01)
+        # [修改] 只有當目標價 > 近期高點 時，才顯示目標價 (突破前高)
+        if target_price > high_90:
+            points.append({"val": target_price, "tag": ""})
 
-        def fmt_v(v): return f"{v:.0f}" if v.is_integer() else f"{v:.2f}"
+        # [修改] 只有當停損價 < 近期低點 時，才顯示停損價 (跌破前低)
+        if stop_price < low_90:
+            points.append({"val": stop_price, "tag": ""})
 
-        # 4. 高點 (High 90)
-        if cond_limit_up_high:
-            points.append({
-                "val": high_90, 
-                "tag": "漲停高", 
-                "extra_text": f"-{fmt_v(target_price)}" 
-            })
-        else:
-            points.append({"val": high_90, "tag": "高"})
-        
-        # 5. 低點 (Low 90)
-        if cond_limit_down_low:
-            points.append({
-                "val": low_90, 
-                "tag": "跌停低",
-                "prefix_text": f"{fmt_v(stop_price)}-"
-            })
-        else:
-            points.append({"val": low_90, "tag": "低"})
-
-        # 6. 一般觸及邏輯 (修正: 若非特殊High/Low，則顯示漲跌停價本身)
-        if touched_up and not cond_limit_up_high:
+        # [修改] 若盤中觸及漲跌停，直接加入漲跌停價
+        if touched_up:
             points.append({"val": limit_up_today, "tag": "漲停"})
         
-        if touched_down and not cond_limit_down_low:
+        if touched_down:
             points.append({"val": limit_down_today, "tag": "跌停"})
             
         display_candidates = []
@@ -446,62 +435,56 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             
         display_candidates.sort(key=lambda x: x['val'])
         
+        # 合併與標籤邏輯
         final_display_points = []
         for val, group in itertools.groupby(display_candidates, key=lambda x: round(x['val'], 2)):
             g_list = list(group)
             tags = [x['tag'] for x in g_list if x['tag']]
             
-            prefix = ""
-            suffix = ""
-            for x in g_list:
-                if 'prefix_text' in x: prefix = x['prefix_text']
-                if 'extra_text' in x: suffix = x['extra_text']
-
             final_tag = ""
             
-            if "漲停高" in tags: final_tag = "漲停高"
-            elif "跌停低" in tags: final_tag = "跌停低"
-            elif "漲停" in tags: final_tag = "漲停"
-            elif "跌停" in tags: final_tag = "跌停"
+            # [修改] 標籤合併：漲停+高=漲停高, 跌停+低=跌停低
+            has_limit_up = "漲停" in tags
+            has_limit_down = "跌停" in tags
+            has_high = "高" in tags
+            has_low = "低" in tags
+            
+            if has_limit_up and has_high: final_tag = "漲停高"
+            elif has_limit_down and has_low: final_tag = "跌停低"
+            elif has_limit_up: final_tag = "漲停"
+            elif has_limit_down: final_tag = "跌停"
             else:
-                if "高" in tags: final_tag = "高"
-                elif "低" in tags: final_tag = "低"
+                if has_high: final_tag = "高"
+                elif has_low: final_tag = "低"
                 elif "多" in tags: final_tag = "多"
                 elif "空" in tags: final_tag = "空"
                 elif "平" in tags: final_tag = "平"
             
+            # 5MA 補償顯示
             if ("多" in tags or "空" in tags or "平" in tags) and final_tag not in ["漲停", "跌停", "漲停高", "跌停低"]:
                 if "多" in tags: final_tag = "多"
                 elif "空" in tags: final_tag = "空"
                 elif "平" in tags: final_tag = "平"
 
-            final_display_points.append({
-                "val": val, 
-                "tag": final_tag, 
-                "prefix": prefix, 
-                "suffix": suffix
-            })
+            final_display_points.append({"val": val, "tag": final_tag})
             
         note_parts = []
         seen_vals = set() 
         for p in final_display_points:
-            if p['val'] in seen_vals and p['tag'] == "" and not p['prefix'] and not p['suffix']: continue
+            # 簡單去重
+            if p['val'] in seen_vals and p['tag'] == "": continue
             seen_vals.add(p['val'])
             
-            v_str = fmt_v(p['val'])
+            v_str = f"{p['val']:.0f}" if p['val'].is_integer() else f"{p['val']:.2f}"
             t = p['tag']
-            pre = p['prefix']
-            suf = p['suffix']
             
-            core = ""
             if t in ["漲停", "漲停高", "跌停", "跌停低", "高", "低"]: 
-                core = f"{t}{v_str}"
+                item = f"{t}{v_str}"
             elif t: 
-                core = f"{v_str}{t}"
+                item = f"{v_str}{t}"
             else: 
-                core = v_str
+                item = v_str
             
-            item = f"{pre}{core}{suf}"
             note_parts.append(item)
         
         strategy_note = "-".join(note_parts)
