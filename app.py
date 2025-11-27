@@ -312,12 +312,11 @@ def apply_sr_rules(price, base_price):
 # 通用價格格式化：去除多餘的 .00
 def fmt_price(v):
     try:
-        if pd.isna(v): return ""
+        if pd.isna(v) or v == "": return ""
         return f"{float(v):.2f}".rstrip('0').rstrip('.')
     except:
         return str(v)
 
-# [修改] 係數從 0.43 調整為 0.44
 def calculate_note_width(series, font_size):
     def get_width(s):
         w = 0
@@ -329,7 +328,6 @@ def calculate_note_width(series, font_size):
     max_w = series.apply(get_width).max()
     if pd.isna(max_w): max_w = 0
     
-    # 係數調整為 0.44
     pixel_width = int(max_w * (font_size * 0.44))
     return max(50, pixel_width)
 
@@ -337,7 +335,7 @@ def recalculate_row(row):
     custom_price = row.get('自訂價(可修)')
     status = ""
     
-    if pd.isna(custom_price) or custom_price == "":
+    if pd.isna(custom_price) or str(custom_price).strip() == "":
         return status
         
     try:
@@ -673,8 +671,8 @@ with tab1:
         for col in input_cols:
             if col not in df_display.columns and col != "_points": df_display[col] = None
 
-        # [修改] 應用精簡數字邏輯到 Tab 1 的表格
-        cols_to_fmt = ["收盤價", "當日漲停價", "當日跌停價", "+3%", "-3%"]
+        # [修改] 1. 增加自訂價到格式化清單
+        cols_to_fmt = ["收盤價", "當日漲停價", "當日跌停價", "+3%", "-3%", "自訂價(可修)"]
         for c in cols_to_fmt:
             if c in df_display.columns:
                 df_display[c] = df_display[c].apply(fmt_price)
@@ -684,10 +682,10 @@ with tab1:
             column_config={
                 "代號": st.column_config.TextColumn(disabled=True, width="small"),
                 "名稱": st.column_config.TextColumn(disabled=True, width="small"),
-                # [修改] 這些欄位改為 TextColumn 以顯示精簡後的格式 (100 而非 100.00)
                 "收盤價": st.column_config.TextColumn(width="small", disabled=True),
                 "漲跌幅": st.column_config.NumberColumn(format="%.2f%%", disabled=True, width="small"),
-                "自訂價(可修)": st.column_config.NumberColumn("自訂價 ✏️", format="%.2f", step=0.01, width=120),
+                # [修改] 2. 自訂價改為 TextColumn 以支援彈性顯示
+                "自訂價(可修)": st.column_config.TextColumn("自訂價 ✏️", width=120),
                 "當日漲停價": st.column_config.TextColumn(width="small", disabled=True),
                 "當日跌停價": st.column_config.TextColumn(width="small", disabled=True),
                 "+3%": st.column_config.TextColumn(width="small", disabled=True),
