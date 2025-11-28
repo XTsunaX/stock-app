@@ -11,6 +11,7 @@ import json
 from datetime import datetime, time as dt_time
 import pytz
 from decimal import Decimal, ROUND_HALF_UP
+import io
 
 # ==========================================
 # 0. 頁面設定與初始化
@@ -544,20 +545,26 @@ with tab1:
     with col_search:
         search_query = st.text_input("🔍 快速查詢 (中文/代號)", placeholder="鴻海, 2603, 緯創")
     with col_file:
-        uploaded_file = st.file_uploader("📂 上傳清單", type=['xlsx', 'csv'])
+        # [新增] 雲端匯入功能
+        src_tab1, src_tab2 = st.tabs(["📂 本機", "☁️ 雲端"])
+        
+        with src_tab1:
+            uploaded_file = st.file_uploader("上傳檔案", type=['xlsx', 'csv'], label_visibility="collapsed")
+        
+        with src_tab2:
+            cloud_url = st.text_input("輸入連結 (CSV/Excel/Google Sheet)", placeholder="https://...")
+            
         selected_sheet = None
         if uploaded_file:
             try:
                 if uploaded_file.name.endswith('.csv'):
                     xl = None 
-                    df_up = pd.read_csv(uploaded_file, dtype=str)
                 else:
                     import importlib.util
                     if importlib.util.find_spec("openpyxl") is None:
-                        st.error("❌ 缺少 openpyxl。")
                         xl = None
                     else: xl = pd.ExcelFile(uploaded_file) 
-            except Exception as e: st.error(f"❌ 讀取失敗: {e}")
+            except: xl = None
 
             if xl:
                 default_idx = 0
@@ -566,34 +573,44 @@ with tab1:
 
     if st.button("🚀 執行分析", type="primary"):
         targets = []
+        df_up = pd.DataFrame()
         
-        if uploaded_file:
-            uploaded_file.seek(0) 
-            try:
+        # [修改] 資料讀取邏輯：優先本機，其次雲端
+        try:
+            if uploaded_file:
+                uploaded_file.seek(0)
                 if uploaded_file.name.endswith('.csv'): df_up = pd.read_csv(uploaded_file, dtype=str)
                 else: 
                     if 'xl' in locals() and xl: df_up = pd.read_excel(uploaded_file, sheet_name=selected_sheet, dtype=str)
-                    else: df_up = pd.DataFrame()
+            elif cloud_url:
+                # 處理 Google Sheet 連結
+                if "docs.google.com" in cloud_url and "/spreadsheets/" in cloud_url and "/edit" in cloud_url:
+                    cloud_url = cloud_url.split("/edit")[0] + "/export?format=csv"
                 
-                if not df_up.empty:
-                    c_col = next((c for c in df_up.columns if "代號" in c), None)
-                    n_col = next((c for c in df_up.columns if "名稱" in c), None)
-                    if c_col:
-                        for _, row in df_up.iterrows():
-                            c_raw = str(row[c_col]).split('.')[0].strip()
-                            if not c_raw or c_raw.lower() == 'nan': continue
-                            if len(c_raw) > 10 or any('\u4e00' <= char <= '\u9fff' for char in c_raw): continue
-                            
-                            # ETF 補零邏輯
-                            if c_raw.isdigit():
-                                if len(c_raw) <= 3: c_raw = "00" + c_raw
-                            elif len(c_raw) == 4 and c_raw[0].isdigit() and c_raw[-1].isalpha():
-                                c_raw = "00" + c_raw
+                try:
+                    df_up = pd.read_csv(cloud_url, dtype=str)
+                except:
+                    try: df_up = pd.read_excel(cloud_url, dtype=str)
+                    except: st.error("❌ 無法讀取雲端檔案，請確認連結格式。")
+        except Exception as e: st.error(f"讀取失敗: {e}")
 
-                            n = str(row[n_col]) if n_col else ""
-                            if n.lower() == 'nan': n = ""
-                            targets.append((c_raw, n, 'upload', {}))
-            except Exception as e: st.error(f"讀取失敗: {e}")
+        if not df_up.empty:
+            c_col = next((c for c in df_up.columns if "代號" in c), None)
+            n_col = next((c for c in df_up.columns if "名稱" in c), None)
+            if c_col:
+                for _, row in df_up.iterrows():
+                    c_raw = str(row[c_col]).split('.')[0].strip()
+                    if not c_raw or c_raw.lower() == 'nan': continue
+                    if len(c_raw) > 10 or any('\u4e00' <= char <= '\u9fff' for char in c_raw): continue
+                    
+                    if c_raw.isdigit():
+                        if len(c_raw) <= 3: c_raw = "00" + c_raw
+                    elif len(c_raw) == 4 and c_raw[0].isdigit() and c_raw[-1].isalpha():
+                        c_raw = "00" + c_raw
+
+                    n = str(row[n_col]) if n_col else ""
+                    if n.lower() == 'nan': n = ""
+                    targets.append((c_raw, n, 'upload', {}))
 
         if search_query:
             inputs = [x.strip() for x in search_query.replace('，',',').split(',') if x.strip()]
@@ -671,7 +688,6 @@ with tab1:
         for col in input_cols:
             if col not in df_display.columns and col != "_points": df_display[col] = None
 
-        # [修改] 1. 增加自訂價到格式化清單
         cols_to_fmt = ["收盤價", "當日漲停價", "當日跌停價", "+3%", "-3%", "自訂價(可修)"]
         for c in cols_to_fmt:
             if c in df_display.columns:
@@ -684,8 +700,7 @@ with tab1:
                 "名稱": st.column_config.TextColumn(disabled=True, width="small"),
                 "收盤價": st.column_config.TextColumn(width="small", disabled=True),
                 "漲跌幅": st.column_config.NumberColumn(format="%.2f%%", disabled=True, width="small"),
-                # [修改] 2. 自訂價改為 TextColumn 以支援彈性顯示
-                "自訂價(可修)": st.column_config.TextColumn("自訂價 ✏️", width="small"),
+                "自訂價(可修)": st.column_config.TextColumn("自訂價 ✏️", width=120),
                 "當日漲停價": st.column_config.TextColumn(width="small", disabled=True),
                 "當日跌停價": st.column_config.TextColumn(width="small", disabled=True),
                 "+3%": st.column_config.TextColumn(width="small", disabled=True),
