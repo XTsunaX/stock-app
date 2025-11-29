@@ -397,7 +397,6 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
 
         points = []
         
-        # 1. 5MA
         ma5_raw = hist['Close'].tail(5).mean()
         ma5 = apply_sr_rules(ma5_raw, current_price)
         
@@ -408,7 +407,6 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         
         points.append({"val": ma5, "tag": ma5_tag, "force": True})
 
-        # 2. 當日 & 昨日 關鍵點
         points.append({"val": apply_tick_rules(today['Open']), "tag": ""})
         points.append({"val": apply_tick_rules(today['High']), "tag": ""})
         points.append({"val": apply_tick_rules(today['Low']), "tag": ""})
@@ -416,7 +414,6 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         points.append({"val": apply_tick_rules(prev_day['High']), "tag": ""})
         points.append({"val": apply_tick_rules(prev_day['Low']), "tag": ""})
         
-        # 3. 近5日高低
         if len(hist) >= 6: past_5 = hist.iloc[-6:-1]
         else: past_5 = hist.iloc[:-1]
             
@@ -424,14 +421,12 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             points.append({"val": apply_tick_rules(past_5['High'].max()), "tag": ""})
             points.append({"val": apply_tick_rules(past_5['Low'].min()), "tag": ""})
         
-        # 4. 近期高低 (90日)
         high_90 = apply_tick_rules(hist['High'].max())
         low_90 = apply_tick_rules(hist['Low'].min())
         
         points.append({"val": high_90, "tag": "高"})
         points.append({"val": low_90, "tag": "低"})
 
-        # 5. 判斷觸及與是否過高/破低
         touched_up = today['High'] >= limit_up_today - 0.01
         touched_down = today['Low'] <= limit_down_today + 0.01
         
@@ -541,17 +536,28 @@ tab1, tab2 = st.tabs(["⚡ 當沖戰略室 ⚡", "💰 當沖損益室 💰"])
 with tab1:
     col_search, col_file = st.columns([2, 1])
     with col_search:
-        # [修改] 1. 準備 Multiselect 資料
         code_map, name_map = load_local_stock_names()
         stock_options = [f"{code} {name}" for code, name in sorted(code_map.items())]
         
         src_tab1, src_tab2 = st.tabs(["📂 本機", "☁️ 雲端"])
         with src_tab1:
             uploaded_file = st.file_uploader("上傳檔案", type=['xlsx', 'csv'], label_visibility="collapsed")
+            selected_sheet = 0
+            if uploaded_file:
+                try:
+                    if not uploaded_file.name.endswith('.csv'):
+                        xl_file = pd.ExcelFile(uploaded_file)
+                        sheet_options = xl_file.sheet_names
+                        default_idx = 0
+                        if "週轉率" in sheet_options:
+                            default_idx = sheet_options.index("週轉率")
+                        selected_sheet = st.selectbox("選擇工作表", sheet_options, index=default_idx)
+                except:
+                    pass
+
         with src_tab2:
             cloud_url = st.text_input("輸入連結 (CSV/Excel/Google Sheet)", placeholder="https://...")
             
-        # [修改] 2. 替換為 Multiselect
         search_selection = st.multiselect("🔍 快速查詢 (中文/代號)", options=stock_options, placeholder="輸入 2330 或 台積電...")
 
     if st.button("🚀 執行分析", type="primary"):
@@ -561,12 +567,10 @@ with tab1:
         try:
             if uploaded_file:
                 uploaded_file.seek(0)
-                if uploaded_file.name.endswith('.csv'): df_up = pd.read_csv(uploaded_file, dtype=str)
+                if uploaded_file.name.endswith('.csv'): 
+                    df_up = pd.read_csv(uploaded_file, dtype=str)
                 else: 
-                    import importlib.util
-                    if importlib.util.find_spec("openpyxl") is None: xl = None
-                    else: xl = pd.ExcelFile(uploaded_file) 
-                    if xl: df_up = pd.read_excel(uploaded_file, sheet_name=0, dtype=str)
+                    df_up = pd.read_excel(uploaded_file, sheet_name=selected_sheet, dtype=str)
             elif cloud_url:
                 if "docs.google.com" in cloud_url and "/spreadsheets/" in cloud_url and "/edit" in cloud_url:
                     cloud_url = cloud_url.split("/edit")[0] + "/export?format=csv"
@@ -592,10 +596,8 @@ with tab1:
                     if n.lower() == 'nan': n = ""
                     targets.append((c_raw, n, 'upload', {}))
 
-        # [修改] 3. 處理 Multiselect 的選擇結果
         if search_selection:
             for item in search_selection:
-                # item 格式為 "3163 波若威"
                 parts = item.split(' ', 1)
                 c_in = parts[0]
                 n_in = parts[1] if len(parts) > 1 else ""
@@ -690,7 +692,8 @@ with tab1:
             },
             hide_index=True, 
             use_container_width=False,
-            num_rows="dynamic",
+            # [修改] 使用 fixed 以移除新增列按鈕
+            num_rows="fixed",
             key="main_editor"
         )
         
