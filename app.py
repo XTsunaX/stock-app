@@ -139,7 +139,7 @@ with st.sidebar:
         st.rerun()
     
     st.caption("功能說明")
-    st.info("🗑️ **如何刪除股票？**\n\n在表格左側勾選並按 `Delete`，該股票將被隱藏。")
+    st.info("🗑️ **如何刪除股票？**\n\n在表格左側勾選「移除」框，該股票將被隱藏。")
 
 # --- 動態 CSS ---
 font_px = f"{st.session_state.font_size}px"
@@ -663,7 +663,10 @@ with tab1:
         
         note_width_px = calculate_note_width(df_display['戰略備註'], current_font_size)
 
-        input_cols = ["代號", "名稱", "戰略備註", "自訂價(可修)", "狀態", "當日漲停價", "當日跌停價", "+3%", "-3%", "收盤價", "漲跌幅", "_points"]
+        # [修改] 1. 加入 "移除" 欄位
+        df_display["移除"] = False
+        
+        input_cols = ["移除", "代號", "名稱", "戰略備註", "自訂價(可修)", "狀態", "當日漲停價", "當日跌停價", "+3%", "-3%", "收盤價", "漲跌幅", "_points"]
         df_display = df_display.rename(columns={"獲利目標": "+3%", "防守停損": "-3%"})
 
         for col in input_cols:
@@ -677,6 +680,8 @@ with tab1:
         edited_df = st.data_editor(
             df_display[input_cols],
             column_config={
+                # [修改] 2. 移除勾選框設定
+                "移除": st.column_config.CheckboxColumn("🗑️", width="small"),
                 "代號": st.column_config.TextColumn(disabled=True, width="small"),
                 "名稱": st.column_config.TextColumn(disabled=True, width="small"),
                 "收盤價": st.column_config.TextColumn(width="small", disabled=True),
@@ -692,7 +697,6 @@ with tab1:
             },
             hide_index=True, 
             use_container_width=False,
-            # [修改] 使用 fixed 以移除新增列按鈕
             num_rows="fixed",
             key="main_editor"
         )
@@ -700,16 +704,15 @@ with tab1:
         col_btn, _ = st.columns([2, 8])
         manual_update = col_btn.button("⚡ 立即更新狀態 (或輸入完最後一列自動更新)", use_container_width=True)
         
-        should_update = False
-        
-        if len(edited_df) < len(df_display):
-            original = set(df_display['代號']); new = set(edited_df['代號'])
-            removed = original - new
-            if removed:
-                st.session_state.ignored_stocks.update(removed)
+        # [修改] 3. 處理移除邏輯
+        if edited_df['移除'].any():
+            removed_codes = edited_df[edited_df['移除']]['代號'].unique()
+            if len(removed_codes) > 0:
+                st.session_state.ignored_stocks.update(removed_codes)
                 save_data_cache(st.session_state.stock_data, st.session_state.ignored_stocks)
                 st.rerun()
-
+        
+        should_update = False
         if len(edited_df) > 0:
             last_idx = len(edited_df) - 1
             last_price = edited_df.iloc[last_idx]['自訂價(可修)']
