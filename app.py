@@ -316,6 +316,7 @@ def fmt_price(v):
     except:
         return str(v)
 
+# [修改] 係數從 0.44 調整為 0.375 (極致緊縮)
 def calculate_note_width(series, font_size):
     def get_width(s):
         w = 0
@@ -327,7 +328,8 @@ def calculate_note_width(series, font_size):
     max_w = series.apply(get_width).max()
     if pd.isna(max_w): max_w = 0
     
-    pixel_width = int(max_w * (font_size * 0.44))
+    # 係數調整為 0.375
+    pixel_width = int(max_w * (font_size * 0.375))
     return max(50, pixel_width)
 
 def recalculate_row(row):
@@ -663,7 +665,6 @@ with tab1:
         
         note_width_px = calculate_note_width(df_display['戰略備註'], current_font_size)
 
-        # [修改] 1. 加入 "移除" 欄位
         df_display["移除"] = False
         
         input_cols = ["移除", "代號", "名稱", "戰略備註", "自訂價(可修)", "狀態", "當日漲停價", "當日跌停價", "+3%", "-3%", "收盤價", "漲跌幅", "_points"]
@@ -680,18 +681,17 @@ with tab1:
         edited_df = st.data_editor(
             df_display[input_cols],
             column_config={
-                # [修改] 2. 移除勾選框設定
                 "移除": st.column_config.CheckboxColumn("🗑️", width="small"),
                 "代號": st.column_config.TextColumn(disabled=True, width="small"),
                 "名稱": st.column_config.TextColumn(disabled=True, width="small"),
                 "收盤價": st.column_config.TextColumn(width="small", disabled=True),
                 "漲跌幅": st.column_config.NumberColumn(format="%.2f%%", disabled=True, width="small"),
-                "自訂價(可修)": st.column_config.TextColumn("自訂價 ✏️", width=120),
+                "自訂價(可修)": st.column_config.TextColumn("自訂價 ✏️", width=100),
                 "當日漲停價": st.column_config.TextColumn(width="small", disabled=True),
                 "當日跌停價": st.column_config.TextColumn(width="small", disabled=True),
                 "+3%": st.column_config.TextColumn(width="small", disabled=True),
                 "-3%": st.column_config.TextColumn(width="small", disabled=True),
-                "狀態": st.column_config.TextColumn(width=80, disabled=True),
+                "狀態": st.column_config.TextColumn(width=60, disabled=True),
                 "戰略備註": st.column_config.TextColumn(width=note_width_px, disabled=True),
                 "_points": None 
             },
@@ -704,7 +704,6 @@ with tab1:
         col_btn, _ = st.columns([2, 8])
         manual_update = col_btn.button("⚡ 立即更新狀態 (或輸入完最後一列自動更新)", use_container_width=True)
         
-        # [修改] 3. 處理移除邏輯
         if edited_df['移除'].any():
             removed_codes = edited_df[edited_df['移除']]['代號'].unique()
             if len(removed_codes) > 0:
