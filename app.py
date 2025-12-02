@@ -374,7 +374,6 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         is_today_data = (last_date == now.date())
         is_during_trading = (now.time() < dt_time(13, 45))
         
-        # 盤中不更新：切掉今日資料
         if is_today_data and is_during_trading and len(hist) > 1:
             hist = hist.iloc[:-1]
         
@@ -414,24 +413,21 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         points.append({"val": apply_tick_rules(today['High']), "tag": ""})
         points.append({"val": apply_tick_rules(today['Low']), "tag": ""})
         
-        points.append({"val": apply_tick_rules(prev_day['Open']), "tag": ""}) # 加回昨開
         points.append({"val": apply_tick_rules(prev_day['High']), "tag": ""})
         points.append({"val": apply_tick_rules(prev_day['Low']), "tag": ""})
-        points.append({"val": apply_tick_rules(prev_day['Close']), "tag": ""}) # 加回昨收
+        points.append({"val": apply_tick_rules(prev_day['Close']), "tag": ""})
         
-        # 3. 近5日高低 (不含今日)
-        # 確保取到的是今日之前的資料
-        if last_date == now.date(): 
-            hist_no_today = hist.iloc[:-1] # 若hist含今日，切掉
-        else:
-            hist_no_today = hist
-            
-        if len(hist_no_today) >= 5:
-            past_5 = hist_no_today.tail(5)
-            points.append({"val": apply_tick_rules(past_5['High'].max()), "tag": ""})
-            points.append({"val": apply_tick_rules(past_5['Low'].min()), "tag": ""})
+        # [修改] 只有當昨日開盤價 等於 昨日高或低 時才加入
+        prev_o = apply_tick_rules(prev_day['Open'])
+        prev_h = apply_tick_rules(prev_day['High'])
+        prev_l = apply_tick_rules(prev_day['Low'])
         
-        # 4. 近期高低 (90日) - 修正：強制包含今日 High/Low 及現價，避免 high_90 是舊資料
+        if abs(prev_o - prev_h) < 0.01 or abs(prev_o - prev_l) < 0.01:
+            points.append({"val": prev_o, "tag": ""})
+        
+        # [修改] 移除 past_5 (5日高低) 邏輯，避免資料不足時報錯或產生雜訊
+        
+        # 3. 近期高低 (90日)
         high_90_raw = max(hist['High'].max(), today['High'], current_price)
         low_90_raw = min(hist['Low'].min(), today['Low'], current_price)
         
@@ -441,7 +437,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         points.append({"val": high_90, "tag": "高"})
         points.append({"val": low_90, "tag": "低"})
 
-        # 5. 判斷觸及與是否過高/破低
+        # 4. 判斷觸及與是否過高/破低
         touched_up = today['High'] >= limit_up_today - 0.01
         touched_down = today['Low'] <= limit_down_today + 0.01
         
@@ -669,6 +665,7 @@ with tab1:
              mask_warrant = (df_all['代號'].str.len() > 4) & df_all['代號'].str.isdigit()
              df_all = df_all[~(mask_etf | mask_warrant)]
         
+        # [修改] 修正顯示邏輯：上傳的資料依 limit 顯示，搜尋的資料接在後面
         if '_source' in df_all.columns:
             df_up = df_all[df_all['_source'] == 'upload'].head(limit)
             df_se = df_all[df_all['_source'] == 'search']
