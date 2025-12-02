@@ -109,8 +109,9 @@ with st.sidebar:
     
     st.markdown("---")
     
+    # [修改] 改回單純的「顯示筆數」標籤
     current_limit_rows = st.number_input(
-        "顯示筆數 (僅用於預設顯示)", 
+        "顯示筆數", 
         min_value=1, 
         key='limit_rows'
     )
@@ -327,7 +328,7 @@ def calculate_note_width(series, font_size):
     max_w = series.apply(get_width).max()
     if pd.isna(max_w): max_w = 0
     
-    # 係數維持 0.44
+    # 係數 0.44
     pixel_width = int(max_w * (font_size * 0.44))
     return max(50, pixel_width)
 
@@ -398,7 +399,6 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
 
         points = []
         
-        # 1. 5MA
         ma5_raw = hist['Close'].tail(5).mean()
         ma5 = apply_sr_rules(ma5_raw, current_price)
         
@@ -409,14 +409,20 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         
         points.append({"val": ma5, "tag": ma5_tag, "force": True})
 
-        # 2. 當日關鍵點
         points.append({"val": apply_tick_rules(today['Open']), "tag": ""})
         points.append({"val": apply_tick_rules(today['High']), "tag": ""})
         points.append({"val": apply_tick_rules(today['Low']), "tag": ""})
         
-        # [修改] 移除昨日 Open/High/Low/Close，避免顯示非近期高低點的雜訊
+        points.append({"val": apply_tick_rules(prev_day['High']), "tag": ""})
+        points.append({"val": apply_tick_rules(prev_day['Low']), "tag": ""})
         
-        # 3. 近期高低 (90日) - 強制包含今日 High/Low 及現價
+        # 昨日開盤價：僅當等於昨日高/低時才顯示 (保留簡潔邏輯)
+        prev_o = apply_tick_rules(prev_day['Open'])
+        prev_h = apply_tick_rules(prev_day['High'])
+        prev_l = apply_tick_rules(prev_day['Low'])
+        if abs(prev_o - prev_h) < 0.01 or abs(prev_o - prev_l) < 0.01:
+            points.append({"val": prev_o, "tag": ""})
+        
         high_90_raw = max(hist['High'].max(), today['High'], current_price)
         low_90_raw = min(hist['Low'].min(), today['Low'], current_price)
         
@@ -426,7 +432,6 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         points.append({"val": high_90, "tag": "高"})
         points.append({"val": low_90, "tag": "低"})
 
-        # 4. 判斷觸及與是否過高/破低
         touched_up = today['High'] >= limit_up_today - 0.01
         touched_down = today['Low'] <= limit_down_today + 0.01
         
@@ -654,9 +659,9 @@ with tab1:
              mask_warrant = (df_all['代號'].str.len() > 4) & df_all['代號'].str.isdigit()
              df_all = df_all[~(mask_etf | mask_warrant)]
         
-        # upload 顯示全部，search 顯示全部
+        # [修改] 顯示邏輯：Upload 依 limit 顯示，Search 全部顯示
         if '_source' in df_all.columns:
-            df_up = df_all[df_all['_source'] == 'upload'] 
+            df_up = df_all[df_all['_source'] == 'upload'].head(limit)
             df_se = df_all[df_all['_source'] == 'search']
             df_display = pd.concat([df_up, df_se]).reset_index(drop=True)
         else:
