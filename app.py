@@ -85,6 +85,10 @@ if 'calc_base_price' not in st.session_state:
 if 'calc_view_price' not in st.session_state:
     st.session_state.calc_view_price = 100.0
 
+# [新增] 初始化 cloud_url
+if 'cloud_url' not in st.session_state:
+    st.session_state.cloud_url = ""
+
 # 優先從設定檔讀取
 saved_config = load_config()
 
@@ -327,7 +331,6 @@ def calculate_note_width(series, font_size):
     max_w = series.apply(get_width).max()
     if pd.isna(max_w): max_w = 0
     
-    # 係數 0.44
     pixel_width = int(max_w * (font_size * 0.44))
     return max(50, pixel_width)
 
@@ -451,7 +454,6 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         for p in points:
             v = float(f"{p['val']:.2f}")
             is_force = p.get('force', False)
-            # 篩選範圍
             if is_force or (limit_down_next <= v <= limit_up_next):
                  display_candidates.append(p) 
             
@@ -562,7 +564,15 @@ with tab1:
                     pass
 
         with src_tab2:
-            cloud_url = st.text_input("輸入連結 (CSV/Excel/Google Sheet)", placeholder="https://...")
+            # [修改] 將輸入值與 session_state 綁定
+            cloud_url_input = st.text_input(
+                "輸入連結 (CSV/Excel/Google Sheet)", 
+                value=st.session_state.cloud_url, 
+                placeholder="https://..."
+            )
+            # [修改] 若輸入有變動，更新 session_state
+            if cloud_url_input != st.session_state.cloud_url:
+                st.session_state.cloud_url = cloud_url_input
             
         search_selection = st.multiselect("🔍 快速查詢 (中文/代號)", options=stock_options, placeholder="輸入 2330 或 台積電...")
 
@@ -577,12 +587,13 @@ with tab1:
                     df_up = pd.read_csv(uploaded_file, dtype=str)
                 else: 
                     df_up = pd.read_excel(uploaded_file, sheet_name=selected_sheet, dtype=str)
-            elif cloud_url:
-                if "docs.google.com" in cloud_url and "/spreadsheets/" in cloud_url and "/edit" in cloud_url:
-                    cloud_url = cloud_url.split("/edit")[0] + "/export?format=csv"
-                try: df_up = pd.read_csv(cloud_url, dtype=str)
+            elif st.session_state.cloud_url: # [修改] 使用 session_state 中的 url
+                url = st.session_state.cloud_url
+                if "docs.google.com" in url and "/spreadsheets/" in url and "/edit" in url:
+                    url = url.split("/edit")[0] + "/export?format=csv"
+                try: df_up = pd.read_csv(url, dtype=str)
                 except:
-                    try: df_up = pd.read_excel(cloud_url, dtype=str)
+                    try: df_up = pd.read_excel(url, dtype=str)
                     except: st.error("❌ 無法讀取雲端檔案。")
         except Exception as e: st.error(f"讀取失敗: {e}")
 
@@ -682,7 +693,6 @@ with tab1:
             if c in df_display.columns:
                 df_display[c] = df_display[c].apply(fmt_price)
 
-        # [修改] 戰略備註開放編輯 (disabled=False)
         edited_df = st.data_editor(
             df_display[input_cols],
             column_config={
@@ -697,7 +707,7 @@ with tab1:
                 "+3%": st.column_config.TextColumn(width="small", disabled=True),
                 "-3%": st.column_config.TextColumn(width="small", disabled=True),
                 "狀態": st.column_config.TextColumn(width=60, disabled=True),
-                "戰略備註": st.column_config.TextColumn(width=note_width_px, disabled=False), # [重點] 開放編輯
+                "戰略備註": st.column_config.TextColumn(width=note_width_px, disabled=False),
                 "_points": None 
             },
             hide_index=True, 
@@ -718,7 +728,6 @@ with tab1:
         
         should_update = False
         if len(edited_df) > 0:
-            # 檢查自訂價變化
             last_idx = len(edited_df) - 1
             last_price = edited_df.iloc[last_idx]['自訂價(可修)']
             orig_last_price = df_display.iloc[last_idx]['自訂價(可修)']
@@ -730,22 +739,11 @@ with tab1:
                 
             if is_diff(last_price, orig_last_price):
                 should_update = True
-            
-            # 檢查戰略備註變化
-            # 由於我們無法輕易知道哪一行的備註變了 (st.data_editor 的回傳是整張表)，
-            # 且手動修改備註不需要觸發重新計算邏輯 (recalculate_row 只算自訂價狀態)，
-            # 所以這裡的 should_update 主要是為了下面的資料回存。
-            # 但為了確保修改能被保存，我們假設只要有互動就可能需要更新資料。
-            pass # 備註修改會自然流到下方 updated_rows
+            pass
         
         if manual_update:
             should_update = True
             
-        # 不論是否 should_update，只要有變動 (包含備註)，都需要更新 Session State
-        # 但為了效能，我們通常只在必要時 rerun。
-        # 不過 st.data_editor 每次互動都會 rerun script，
-        # 所以這裡主要是捕捉 edited_df 的內容回存。
-        
         updated_rows = []
         for idx, row in edited_df.iterrows():
             new_status = recalculate_row(row)
@@ -754,7 +752,6 @@ with tab1:
             
         if updated_rows:
             df_updated = pd.DataFrame(updated_rows)
-            # [修改] 將 '戰略備註' 加入回存清單
             update_map = df_updated.set_index('代號')[['自訂價(可修)', '狀態', '戰略備註']].to_dict('index')
             
             for i, r in st.session_state.stock_data.iterrows():
@@ -762,9 +759,8 @@ with tab1:
                 if code in update_map:
                     st.session_state.stock_data.at[i, '自訂價(可修)'] = update_map[code]['自訂價(可修)']
                     st.session_state.stock_data.at[i, '狀態'] = update_map[code]['狀態']
-                    st.session_state.stock_data.at[i, '戰略備註'] = update_map[code]['戰略備註'] # [重點] 回存備註
+                    st.session_state.stock_data.at[i, '戰略備註'] = update_map[code]['戰略備註']
             
-            # 如果是按鈕觸發或關鍵資料變動，再強制 rerun
             if should_update or manual_update:
                 st.rerun()
 
