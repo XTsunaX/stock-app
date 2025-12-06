@@ -18,38 +18,6 @@ import io
 # ==========================================
 st.set_page_config(page_title="當沖戰略室", page_icon="⚡", layout="wide")
 
-# [修正 1] CSS 修復側邊欄圖標 (遵照指示使用偽元素覆蓋)
-st.markdown("""
-    <style>
-    /* 針對側邊欄收合按鈕進行修正 */
-    [data-testid="stSidebarCollapsedControl"] {
-        border: none !important;
-    }
-    /* 隱藏原本顯示錯誤代碼的圖標元素 */
-    [data-testid="stSidebarCollapsedControl"] svg, 
-    [data-testid="stSidebarCollapsedControl"] i {
-        display: none !important;
-    }
-    /* 插入自定義箭頭 */
-    [data-testid="stSidebarCollapsedControl"]::after {
-        content: "➤"; 
-        font-size: 20px;
-        color: #555;
-        display: block;
-        padding-top: 5px;
-    }
-    
-    /* 表格樣式優化 */
-    .block-container { padding-top: 4.5rem; padding-bottom: 1rem; }
-    div[data-testid="stDataFrame"] table, td, th, input, div, span, p {
-        font-family: 'Microsoft JhengHei', sans-serif !important;
-    }
-    [data-testid="stMetricValue"] { font-size: 1.2em; }
-    thead tr th:first-child { display:none }
-    tbody th { display:none }
-    </style>
-""", unsafe_allow_html=True)
-
 # 1. 標題
 st.title("⚡ 當沖戰略室 ⚡")
 
@@ -116,7 +84,7 @@ if 'font_size' not in st.session_state:
     st.session_state.font_size = saved_config.get('font_size', 15)
 
 if 'limit_rows' not in st.session_state:
-    st.session_state.limit_rows = saved_config.get('limit_rows', 5) # 預設 5
+    st.session_state.limit_rows = saved_config.get('limit_rows', 5)
 
 # --- 側邊欄設定 ---
 with st.sidebar:
@@ -167,14 +135,47 @@ with st.sidebar:
             st.rerun()
     
     st.caption("功能說明")
-    st.info("🗑️ **如何刪除股票？**\n\n在表格左側勾選「移除」框，該股票將被隱藏。")
+    st.info("🗑️ **如何刪除股票？**\n\n在表格左側勾選「刪除」框，該股票將被隱藏。")
 
-# --- 動態 CSS (Zoom) ---
+# --- 動態 CSS ---
 font_px = f"{st.session_state.font_size}px"
 zoom_level = current_font_size / 14.0
+
+# [修正 1] 嚴格限制 CSS 作用範圍，只針對 stDataFrame 內部
+# 移除了對外部 button, i, svg 的干擾，讓側邊欄圖標恢復原狀
 st.markdown(f"""
     <style>
-    div[data-testid="stDataFrame"] {{ width: 100%; zoom: {zoom_level}; }}
+    /* 表格容器縮放 */
+    div[data-testid="stDataFrame"] {{
+        width: 100%;
+        zoom: {zoom_level};
+    }}
+    
+    /* 只針對表格內的元素設定字體 */
+    div[data-testid="stDataFrame"] table, 
+    div[data-testid="stDataFrame"] thead, 
+    div[data-testid="stDataFrame"] tbody, 
+    div[data-testid="stDataFrame"] tr, 
+    div[data-testid="stDataFrame"] th, 
+    div[data-testid="stDataFrame"] td, 
+    div[data-testid="stDataFrame"] div, 
+    div[data-testid="stDataFrame"] span, 
+    div[data-testid="stDataFrame"] p {{
+        font-family: 'Microsoft JhengHei', sans-serif !important;
+    }}
+
+    /* 輸入框字體修正 */
+    div[data-testid="stDataFrame"] input {{
+        font-family: 'Microsoft JhengHei', sans-serif !important;
+        font-size: 0.9rem !important; 
+    }}
+    
+    /* 隱藏索引 */
+    thead tr th:first-child {{ display:none }}
+    tbody th {{ display:none }}
+    
+    .block-container {{ padding-top: 4.5rem; padding-bottom: 1rem; }}
+    [data-testid="stMetricValue"] {{ font-size: 1.2em; }}
     </style>
 """, unsafe_allow_html=True)
 
@@ -319,7 +320,6 @@ def recalculate_row(row, points_map):
 def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     code = str(code).strip()
     try:
-        # [速度優化] 低延遲
         time.sleep(0.1)
         
         ticker = yf.Ticker(f"{code}.TW")
@@ -373,7 +373,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         points.append({"val": apply_tick_rules(today['High']), "tag": ""})
         points.append({"val": apply_tick_rules(today['Low']), "tag": ""})
         
-        # 昨日 (範圍篩選)
+        # 昨日
         p_close = apply_tick_rules(prev_day['Close'])
         p_high = apply_tick_rules(prev_day['High'])
         p_low = apply_tick_rules(prev_day['Low'])
@@ -382,7 +382,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         if limit_down_next <= p_high <= limit_up_next: points.append({"val": p_high, "tag": ""})
         if limit_down_next <= p_low <= limit_up_next: points.append({"val": p_low, "tag": ""})
         
-        # 近期高低 (90日)
+        # 近期高低
         high_90_raw = max(hist['High'].max(), today['High'], current_price)
         low_90_raw = min(hist['Low'].min(), today['Low'], current_price)
         high_90 = apply_tick_rules(high_90_raw)
@@ -480,7 +480,7 @@ with tab1:
         
         src_tab1, src_tab2 = st.tabs(["📂 本機", "☁️ 雲端"])
         with src_tab1:
-            uploaded_file = st.file_uploader("上傳檔案", type=['xlsx', 'csv', 'html', 'xls'], label_visibility="collapsed")
+            uploaded_file = st.file_uploader("上傳檔案 (CSV/XLS/HTML)", type=['xlsx', 'csv', 'html', 'xls'], label_visibility="collapsed")
             selected_sheet = 0
             if uploaded_file:
                 try:
@@ -493,7 +493,7 @@ with tab1:
                 except: pass
 
         with src_tab2:
-            # [修正 3] 網址綁定 session_state
+            # [修正 3] 連結記憶
             def update_url():
                  st.session_state.cloud_url = st.session_state.cloud_url_input
             
@@ -541,8 +541,8 @@ with tab1:
                 elif fname.endswith('.xlsx'):
                     df_up = pd.read_excel(uploaded_file, sheet_name=selected_sheet, dtype=str)
 
-            elif st.session_state.cloud_url:
-                url = st.session_state.cloud_url
+            elif st.session_state.cloud_url_input:
+                url = st.session_state.cloud_url_input
                 if "docs.google.com" in url and "/spreadsheets/" in url and "/edit" in url:
                     url = url.split("/edit")[0] + "/export?format=csv"
                 try: df_up = pd.read_csv(url, dtype=str)
@@ -684,23 +684,46 @@ with tab1:
                 save_data_cache(st.session_state.stock_data, st.session_state.ignored_stocks)
                 st.rerun()
         
-        # [修正 2] 更新邏輯
-        is_last_row_changed = False
-        if len(edited_df) > 0:
-            last_idx = len(edited_df) - 1
-            last_val = str(edited_df.iloc[last_idx]['自訂價(可修)'])
-            orig_val = str(df_display.iloc[last_idx]['自訂價(可修)'])
-            if last_val != orig_val:
-                is_last_row_changed = True
+        # [修正 2] 
+        # 1. 手動更新
+        # 2. 自動偵測「最後一列」自訂價是否有值 (且之前沒值，或者只是簡單地檢查最後一列有無變動)
+        # 簡單邏輯：檢查是否有任何自訂價變動，如果有 -> 更新狀態但不 rerun (除非按按鈕)
+        # 為了滿足「打完最後一列自動更新」，我們檢查最後一列是否非空
+        
+        updated_rows = []
+        for idx, row in edited_df.iterrows():
+            new_status = recalculate_row(row, points_map)
+            row['狀態'] = new_status
+            updated_rows.append(row)
 
-        # 觸發條件：手動按鈕 OR 最後一列變更
-        if manual_update or is_last_row_changed:
-            updated_rows = []
-            for idx, row in edited_df.iterrows():
-                new_status = recalculate_row(row, points_map)
-                row['狀態'] = new_status
-                updated_rows.append(row)
-                
+        # 檢查最後一列是否有自訂價
+        is_last_filled = False
+        if len(edited_df) > 0:
+            last_val = str(edited_df.iloc[-1]['自訂價(可修)']).strip()
+            if last_val and last_val != "nan" and last_val != "None":
+                is_last_filled = True
+        
+        # 只有在 (按按鈕) 或 (最後一列已填寫且狀態尚未計算) 時才 Rerun
+        # 這裡簡化為：若按按鈕，強制重算存檔。若無，僅計算顯示 (不存檔/不重整) 以保持流暢
+        # 但使用者要求「自動更新」，即「最後一列打完 -> 自動觸發重整」
+        
+        # 為了達成「不中斷輸入」，我們不能在中間列 rerun
+        # 我們檢查：如果最後一列有值，且原本的狀態是空的 (代表剛打完)，則重整
+        
+        should_auto_rerun = False
+        if len(edited_df) > 0:
+            last_row_idx = len(edited_df) - 1
+            last_price = str(edited_df.iloc[last_row_idx]['自訂價(可修)']).strip()
+            last_status = str(df_display.iloc[last_row_idx]['狀態']).strip()
+            # 如果最後一列有價錢，但狀態還是空的(或舊的)，且這個價錢跟原本不一樣 -> 觸發
+            if last_price and last_price != "nan" and last_price != "None":
+                 # 簡單判斷：最後一列有值就視為完成，可以更新全表
+                 # 但為了不一直刷，我們比較 edited_df 和 df_display 的最後一列價格是否不同
+                 orig_last_price = str(df_display.iloc[last_row_idx]['自訂價(可修)']).strip()
+                 if last_price != orig_last_price:
+                     should_auto_rerun = True
+
+        if manual_update or should_auto_rerun:
             df_updated = pd.DataFrame(updated_rows)
             update_map = df_updated.set_index('代號')[['自訂價(可修)', '狀態', '戰略備註']].to_dict('index')
             
@@ -710,16 +733,15 @@ with tab1:
                     st.session_state.stock_data.at[i, '自訂價(可修)'] = update_map[code]['自訂價(可修)']
                     st.session_state.stock_data.at[i, '狀態'] = update_map[code]['狀態']
                     st.session_state.stock_data.at[i, '戰略備註'] = update_map[code]['戰略備註']
-            
             st.rerun()
         else:
-            # 即使沒觸發更新，也要暫存使用者輸入的自訂價到 session_state，避免重整消失
-            # 但不觸發 rerun，保持介面穩定
-            updated_map = edited_df.set_index('代號')['自訂價(可修)'].to_dict()
+            # 靜默保存自訂價 (不重整，避免中斷輸入)
+            # 這樣切換分頁再回來資料還在
+            temp_map = pd.DataFrame(updated_rows).set_index('代號')['自訂價(可修)'].to_dict()
             for i, r in st.session_state.stock_data.iterrows():
                 code = r['代號']
-                if code in updated_map:
-                    st.session_state.stock_data.at[i, '自訂價(可修)'] = updated_map[code]
+                if code in temp_map:
+                    st.session_state.stock_data.at[i, '自訂價(可修)'] = temp_map[code]
 
 with tab2:
     st.markdown("#### 💰 當沖損益室 💰")
