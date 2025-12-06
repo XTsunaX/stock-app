@@ -239,19 +239,17 @@ def search_code_online(query):
     return None
 
 # [新增] 爬取 Yahoo 週轉率排行
-@st.cache_data(ttl=1800) # 快取30分鐘
+@st.cache_data(ttl=1800)
 def scrape_yahoo_rank(limit=30):
     url = "https://tw.stock.yahoo.com/rank/turnover-ratio"
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
         r = requests.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(r.text, "html.parser")
-        # Yahoo 排行榜通常是列表連結
         codes = []
         for a in soup.find_all('a', href=True):
             href = a['href']
             if "/quote/" in href and (".TW" in href or ".TWO" in href):
-                # href 範例: /quote/1513.TW
                 parts = href.split("/quote/")[1].split(".")
                 code = parts[0]
                 if code.isdigit() and code not in codes:
@@ -354,7 +352,6 @@ def calculate_note_width(series, font_size):
     max_w = series.apply(get_width).max()
     if pd.isna(max_w): max_w = 0
     
-    # 係數 0.44
     pixel_width = int(max_w * (font_size * 0.44))
     return max(50, pixel_width)
 
@@ -388,7 +385,6 @@ def recalculate_row(row):
 def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     code = str(code).strip()
     try:
-        # yfinance 重試機制
         ticker = yf.Ticker(f"{code}.TW")
         hist = ticker.history(period="3mo") 
         if hist.empty:
@@ -404,7 +400,6 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         is_today_data = (last_date == now.date())
         is_during_trading = (now.time() < dt_time(13, 45))
         
-        # 盤中不更新：切掉今日資料
         if is_today_data and is_during_trading and len(hist) > 1:
             hist = hist.iloc[:-1]
         
@@ -428,7 +423,6 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
 
         points = []
         
-        # 1. 5MA
         ma5_raw = hist['Close'].tail(5).mean()
         ma5 = apply_sr_rules(ma5_raw, current_price)
         
@@ -439,18 +433,21 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         
         points.append({"val": ma5, "tag": ma5_tag, "force": True})
 
-        # 2. 當日關鍵點
         points.append({"val": apply_tick_rules(today['Open']), "tag": ""})
         points.append({"val": apply_tick_rules(today['High']), "tag": ""})
         points.append({"val": apply_tick_rules(today['Low']), "tag": ""})
         
-        # 昨日收盤價
+        points.append({"val": apply_tick_rules(prev_day['High']), "tag": ""})
+        points.append({"val": apply_tick_rules(prev_day['Low']), "tag": ""})
+        
         points.append({"val": apply_tick_rules(prev_day['Close']), "tag": ""})
         
-        # [修正] 移除昨日開盤/高/低點的強制顯示，解決 3535 晶彩科 84.6 問題
-        # 只有當昨日高/低點也是近期 90日高/低點時，才會透過 high_90/low_90 顯示
+        prev_o = apply_tick_rules(prev_day['Open'])
+        prev_h = apply_tick_rules(prev_day['High'])
+        prev_l = apply_tick_rules(prev_day['Low'])
+        if abs(prev_o - prev_h) < 0.01 or abs(prev_o - prev_l) < 0.01:
+            points.append({"val": prev_o, "tag": ""})
         
-        # 3. 近期高低 (90日) - 強制包含今日 High/Low 及現價
         high_90_raw = max(hist['High'].max(), today['High'], current_price)
         low_90_raw = min(hist['Low'].min(), today['Low'], current_price)
         
@@ -460,7 +457,6 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         points.append({"val": high_90, "tag": "高"})
         points.append({"val": low_90, "tag": "低"})
 
-        # 4. 判斷觸及與是否過高/破低
         touched_up = (today['High'] >= limit_up_today - 0.01) or (abs(current_price - limit_up_today) < 0.01)
         touched_down = (today['Low'] <= limit_down_today + 0.01) or (abs(current_price - limit_down_today) < 0.01)
         
@@ -480,7 +476,6 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         for p in points:
             v = float(f"{p['val']:.2f}")
             is_force = p.get('force', False)
-            # 篩選範圍
             if is_force or (limit_down_next <= v <= limit_up_next):
                  display_candidates.append(p) 
             
@@ -601,7 +596,7 @@ with tab1:
             
         search_selection = st.multiselect("🔍 快速查詢 (中文/代號)", options=stock_options, placeholder="輸入 2330 或 台積電...")
 
-    # [新增] 左右排列按鈕
+    # 雙按鈕
     c1, c2 = st.columns(2)
     with c1:
         run_analysis = st.button("🚀 執行分析", type="primary", use_container_width=True)
@@ -612,14 +607,15 @@ with tab1:
         targets = []
         df_up = pd.DataFrame()
         
-        # 1. 處理週轉率排行
+        # 1. 抓取週轉率排行
         if run_turnover:
-            with st.spinner("🔥 正在抓取週轉率排行..."):
-                rank_codes = scrape_yahoo_rank(limit=30)
+            limit_count = st.session_state.limit_rows # 使用設定的筆數
+            with st.spinner(f"🔥 正在抓取週轉率排行 (前 {limit_count} 筆)..."):
+                rank_codes = scrape_yahoo_rank(limit=limit_count)
                 for code in rank_codes:
                     targets.append((code, "", 'rank', {}))
                     
-        # 2. 處理原本的分析邏輯 (若沒按週轉率，或兩者都想看)
+        # 2. 執行原本的分析 (上傳/搜尋)
         if run_analysis:
             try:
                 if uploaded_file:
@@ -657,9 +653,7 @@ with tab1:
             if search_selection:
                 for item in search_selection:
                     parts = item.split(' ', 1)
-                    c_in = parts[0]
-                    n_in = parts[1] if len(parts) > 1 else ""
-                    targets.append((c_in, n_in, 'search', {}))
+                    targets.append((parts[0], parts[1] if len(parts) > 1 else "", 'search', {}))
 
         results = []
         seen = set()
@@ -685,7 +679,7 @@ with tab1:
                 if code.startswith("00"): continue
                 if len(code) > 4 and code.isdigit(): continue
             
-            time.sleep(1.0) # 防止封鎖
+            time.sleep(1.0)
             
             if code in fetch_cache: data = fetch_cache[code]
             else:
@@ -724,7 +718,8 @@ with tab1:
         if '_source' in df_all.columns:
             df_up = df_all[df_all['_source'] == 'upload'].head(limit)
             df_se = df_all[df_all['_source'] == 'search']
-            df_rank = df_all[df_all['_source'] == 'rank']
+            # [修正] 排行榜也套用 limit 限制顯示
+            df_rank = df_all[df_all['_source'] == 'rank'].head(limit)
             df_display = pd.concat([df_up, df_se, df_rank]).reset_index(drop=True)
         else:
             df_display = df_all.head(limit).reset_index(drop=True)
@@ -790,7 +785,6 @@ with tab1:
                 
             if is_diff(last_price, orig_last_price):
                 should_update = True
-            
             pass
         
         if manual_update:
