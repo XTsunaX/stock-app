@@ -238,6 +238,30 @@ def search_code_online(query):
         pass
     return None
 
+# [新增] 爬取 Yahoo 週轉率排行
+@st.cache_data(ttl=1800) # 快取30分鐘
+def scrape_yahoo_rank(limit=30):
+    url = "https://tw.stock.yahoo.com/rank/turnover-ratio"
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    try:
+        r = requests.get(url, headers=headers, timeout=5)
+        soup = BeautifulSoup(r.text, "html.parser")
+        # Yahoo 排行榜通常是列表連結
+        codes = []
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            if "/quote/" in href and (".TW" in href or ".TWO" in href):
+                # href 範例: /quote/1513.TW
+                parts = href.split("/quote/")[1].split(".")
+                code = parts[0]
+                if code.isdigit() and code not in codes:
+                    codes.append(code)
+                if len(codes) >= limit:
+                    break
+        return codes
+    except:
+        return []
+
 # ==========================================
 # 2. 核心計算邏輯
 # ==========================================
@@ -330,6 +354,7 @@ def calculate_note_width(series, font_size):
     max_w = series.apply(get_width).max()
     if pd.isna(max_w): max_w = 0
     
+    # 係數 0.44
     pixel_width = int(max_w * (font_size * 0.44))
     return max(50, pixel_width)
 
@@ -363,11 +388,13 @@ def recalculate_row(row):
 def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     code = str(code).strip()
     try:
+        # yfinance 重試機制
         ticker = yf.Ticker(f"{code}.TW")
         hist = ticker.history(period="3mo") 
         if hist.empty:
             ticker = yf.Ticker(f"{code}.TWO")
             hist = ticker.history(period="3mo")
+        
         if hist.empty: 
             return None
 
@@ -377,6 +404,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         is_today_data = (last_date == now.date())
         is_during_trading = (now.time() < dt_time(13, 45))
         
+        # 盤中不更新：切掉今日資料
         if is_today_data and is_during_trading and len(hist) > 1:
             hist = hist.iloc[:-1]
         
@@ -416,19 +444,11 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         points.append({"val": apply_tick_rules(today['High']), "tag": ""})
         points.append({"val": apply_tick_rules(today['Low']), "tag": ""})
         
-        # 昨日高低點
-        points.append({"val": apply_tick_rules(prev_day['High']), "tag": ""})
-        points.append({"val": apply_tick_rules(prev_day['Low']), "tag": ""})
-        
         # 昨日收盤價
         points.append({"val": apply_tick_rules(prev_day['Close']), "tag": ""})
         
-        # 昨日開盤價 (僅當等於昨日高/低時才顯示)
-        prev_o = apply_tick_rules(prev_day['Open'])
-        prev_h = apply_tick_rules(prev_day['High'])
-        prev_l = apply_tick_rules(prev_day['Low'])
-        if abs(prev_o - prev_h) < 0.01 or abs(prev_o - prev_l) < 0.01:
-            points.append({"val": prev_o, "tag": ""})
+        # [修正] 移除昨日開盤/高/低點的強制顯示，解決 3535 晶彩科 84.6 問題
+        # 只有當昨日高/低點也是近期 90日高/低點時，才會透過 high_90/low_90 顯示
         
         # 3. 近期高低 (90日) - 強制包含今日 High/Low 及現價
         high_90_raw = max(hist['High'].max(), today['High'], current_price)
@@ -440,7 +460,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         points.append({"val": high_90, "tag": "高"})
         points.append({"val": low_90, "tag": "低"})
 
-        # 4. 判斷觸及
+        # 4. 判斷觸及與是否過高/破低
         touched_up = (today['High'] >= limit_up_today - 0.01) or (abs(current_price - limit_up_today) < 0.01)
         touched_down = (today['Low'] <= limit_down_today + 0.01) or (abs(current_price - limit_down_today) < 0.01)
         
@@ -581,54 +601,69 @@ with tab1:
             
         search_selection = st.multiselect("🔍 快速查詢 (中文/代號)", options=stock_options, placeholder="輸入 2330 或 台積電...")
 
-    if st.button("🚀 執行分析", type="primary"):
+    # [新增] 左右排列按鈕
+    c1, c2 = st.columns(2)
+    with c1:
+        run_analysis = st.button("🚀 執行分析", type="primary", use_container_width=True)
+    with c2:
+        run_turnover = st.button("🔥 抓取週轉率排行", use_container_width=True)
+
+    if run_analysis or run_turnover:
         targets = []
         df_up = pd.DataFrame()
         
-        try:
-            if uploaded_file:
-                uploaded_file.seek(0)
-                if uploaded_file.name.endswith('.csv'): 
-                    df_up = pd.read_csv(uploaded_file, dtype=str)
-                else: 
-                    df_up = pd.read_excel(uploaded_file, sheet_name=selected_sheet, dtype=str)
-            elif st.session_state.cloud_url:
-                url = st.session_state.cloud_url
-                if "docs.google.com" in url and "/spreadsheets/" in url and "/edit" in url:
-                    url = url.split("/edit")[0] + "/export?format=csv"
-                try: df_up = pd.read_csv(url, dtype=str)
-                except:
-                    try: df_up = pd.read_excel(url, dtype=str)
-                    except: st.error("❌ 無法讀取雲端檔案。")
-        except Exception as e: st.error(f"讀取失敗: {e}")
+        # 1. 處理週轉率排行
+        if run_turnover:
+            with st.spinner("🔥 正在抓取週轉率排行..."):
+                rank_codes = scrape_yahoo_rank(limit=30)
+                for code in rank_codes:
+                    targets.append((code, "", 'rank', {}))
+                    
+        # 2. 處理原本的分析邏輯 (若沒按週轉率，或兩者都想看)
+        if run_analysis:
+            try:
+                if uploaded_file:
+                    uploaded_file.seek(0)
+                    if uploaded_file.name.endswith('.csv'): 
+                        df_up = pd.read_csv(uploaded_file, dtype=str)
+                    else: 
+                        df_up = pd.read_excel(uploaded_file, sheet_name=selected_sheet, dtype=str)
+                elif st.session_state.cloud_url:
+                    url = st.session_state.cloud_url
+                    if "docs.google.com" in url and "/spreadsheets/" in url and "/edit" in url:
+                        url = url.split("/edit")[0] + "/export?format=csv"
+                    try: df_up = pd.read_csv(url, dtype=str)
+                    except:
+                        try: df_up = pd.read_excel(url, dtype=str)
+                        except: st.error("❌ 無法讀取雲端檔案。")
+            except Exception as e: st.error(f"讀取失敗: {e}")
 
-        if not df_up.empty:
-            c_col = next((c for c in df_up.columns if "代號" in c), None)
-            n_col = next((c for c in df_up.columns if "名稱" in c), None)
-            if c_col:
-                for _, row in df_up.iterrows():
-                    c_raw = str(row[c_col]).split('.')[0].strip()
-                    if not c_raw or c_raw.lower() == 'nan': continue
-                    if len(c_raw) > 10 or any('\u4e00' <= char <= '\u9fff' for char in c_raw): continue
-                    if c_raw.isdigit():
-                        if len(c_raw) <= 3: c_raw = "00" + c_raw
-                    elif len(c_raw) == 4 and c_raw[0].isdigit() and c_raw[-1].isalpha():
-                        c_raw = "00" + c_raw
-                    n = str(row[n_col]) if n_col else ""
-                    if n.lower() == 'nan': n = ""
-                    targets.append((c_raw, n, 'upload', {}))
+            if not df_up.empty:
+                c_col = next((c for c in df_up.columns if "代號" in c), None)
+                n_col = next((c for c in df_up.columns if "名稱" in c), None)
+                if c_col:
+                    for _, row in df_up.iterrows():
+                        c_raw = str(row[c_col]).split('.')[0].strip()
+                        if not c_raw or c_raw.lower() == 'nan': continue
+                        if len(c_raw) > 10 or any('\u4e00' <= char <= '\u9fff' for char in c_raw): continue
+                        if c_raw.isdigit():
+                            if len(c_raw) <= 3: c_raw = "00" + c_raw
+                        elif len(c_raw) == 4 and c_raw[0].isdigit() and c_raw[-1].isalpha():
+                            c_raw = "00" + c_raw
+                        n = str(row[n_col]) if n_col else ""
+                        if n.lower() == 'nan': n = ""
+                        targets.append((c_raw, n, 'upload', {}))
 
-        if search_selection:
-            for item in search_selection:
-                parts = item.split(' ', 1)
-                c_in = parts[0]
-                n_in = parts[1] if len(parts) > 1 else ""
-                targets.append((c_in, n_in, 'search', {}))
+            if search_selection:
+                for item in search_selection:
+                    parts = item.split(' ', 1)
+                    c_in = parts[0]
+                    n_in = parts[1] if len(parts) > 1 else ""
+                    targets.append((c_in, n_in, 'search', {}))
 
         results = []
         seen = set()
         
-        # [新增] 狀態容器與進度條
         status_text = st.empty()
         bar = st.progress(0)
         
@@ -641,7 +676,6 @@ with tab1:
 
         fetch_cache = {}
         for i, (code, name, source, extra) in enumerate(targets):
-            # [新增] 更新狀態文字
             status_text.text(f"正在分析 {i+1}/{total}: {code} {name} ...")
             
             if code in st.session_state.ignored_stocks: continue
@@ -651,8 +685,7 @@ with tab1:
                 if code.startswith("00"): continue
                 if len(code) > 4 and code.isdigit(): continue
             
-            # [重點] 加入延遲，確保 yfinance 不會封鎖請求
-            time.sleep(1.0)
+            time.sleep(1.0) # 防止封鎖
             
             if code in fetch_cache: data = fetch_cache[code]
             else:
@@ -691,7 +724,8 @@ with tab1:
         if '_source' in df_all.columns:
             df_up = df_all[df_all['_source'] == 'upload'].head(limit)
             df_se = df_all[df_all['_source'] == 'search']
-            df_display = pd.concat([df_up, df_se]).reset_index(drop=True)
+            df_rank = df_all[df_all['_source'] == 'rank']
+            df_display = pd.concat([df_up, df_se, df_rank]).reset_index(drop=True)
         else:
             df_display = df_all.head(limit).reset_index(drop=True)
         
