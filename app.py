@@ -102,10 +102,11 @@ with st.sidebar:
     st.markdown("---")
     
     current_limit_rows = st.number_input(
-        "顯示筆數", 
+        "顯示筆數 (亦為分析上限)", 
         min_value=1, 
         value=st.session_state.limit_rows,
-        key='limit_rows_input'
+        key='limit_rows_input',
+        help="設定為 5 時，系統將只會分析前 5 檔股票，加快速度。"
     )
     st.session_state.limit_rows = current_limit_rows
     
@@ -544,7 +545,11 @@ with tab1:
         seen = set()
         status_text = st.empty()
         bar = st.progress(0)
-        total = len(targets)
+        
+        # [優化] 設定執行上限，依據使用者的「顯示筆數」決定分析數量
+        run_limit = st.session_state.limit_rows
+        # 實際要跑的數量是 targets 總數與限制數量的最小值 (若 targets 少於限制則跑完)
+        total_to_run = min(len(targets), run_limit)
         
         existing_data = {}
         if not st.session_state.stock_data.empty:
@@ -552,13 +557,17 @@ with tab1:
                 existing_data[row['代號']] = row.to_dict()
 
         fetch_cache = {}
+        processed_count = 0
+        
         for i, (code, name, source, extra) in enumerate(targets):
-            status_text.text(f"正在分析 {i+1}/{total}: {code} {name} ...")
+            # [優化] 超過設定筆數就停止分析
+            if processed_count >= run_limit:
+                break
+                
+            status_text.text(f"正在分析 {processed_count+1}/{total_to_run}: {code} {name} ...")
             
             if code in st.session_state.ignored_stocks: continue
             if (code, source) in seen: continue
-            
-            # 這裡不隱藏，顯示時再過濾
             
             time.sleep(0.1)
             
@@ -572,8 +581,9 @@ with tab1:
                 data['_order'] = extra
                 existing_data[code] = data
                 seen.add((code, source))
-                
-            if total > 0: bar.progress((i+1)/total)
+            
+            processed_count += 1
+            if total_to_run > 0: bar.progress(min(processed_count / total_to_run, 1.0))
         
         bar.empty()
         status_text.empty()
@@ -620,10 +630,14 @@ with tab1:
         for c in cols_to_fmt:
             if c in df_display.columns: df_display[c] = df_display[c].apply(fmt_price)
 
-        # [修正] 強制資料清洗，解決圖標錯誤
+        # [修正] 強制資料清洗，解決異常文字(nan/None)顯示問題
         df_display = df_display.reset_index(drop=True)
         for col in input_cols:
-             if col != "移除": df_display[col] = df_display[col].astype(str)
+             if col != "移除": 
+                 # 先填補空值為空白，再轉字串，避免 None 變成 "None"
+                 df_display[col] = df_display[col].fillna("").astype(str)
+                 # 再次確保沒有字串形式的 nan
+                 df_display[col] = df_display[col].replace({'nan': '', 'None': ''})
 
         edited_df = st.data_editor(
             df_display[input_cols],
