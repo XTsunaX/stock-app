@@ -361,7 +361,9 @@ def recalculate_row(row):
 def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     code = str(code).strip()
     try:
-        # 重試機制
+        # 智能延遲，避免被封鎖
+        time.sleep(0.8)
+        
         ticker = yf.Ticker(f"{code}.TW")
         hist = ticker.history(period="3mo") 
         if hist.empty:
@@ -378,21 +380,16 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         is_during_trading = (now.time() < dt_time(13, 45))
         
         if is_today_data and is_during_trading and len(hist) > 1:
-            # 盤中：取倒數第二筆為昨日
-            today = hist.iloc[-1]
-            hist_prior = hist.iloc[:-1]
-            prev_day = hist_prior.iloc[-1]
-        else:
-            # 盤後：取最後一筆為今日
-            today = hist.iloc[-1]
-            if len(hist) >= 2:
-                prev_day = hist.iloc[-2]
-                hist_prior = hist.iloc[:-1]
-            else:
-                prev_day = today
-                hist_prior = hist
+            hist = hist.iloc[:-1]
         
+        today = hist.iloc[-1]
         current_price = today['Close']
+        
+        if len(hist) >= 2: prev_day = hist.iloc[-2]
+        else: prev_day = today
+        
+        if pd.isna(current_price) or pd.isna(prev_day['Close']): return None
+
         pct_change = ((current_price - prev_day['Close']) / prev_day['Close']) * 100
         
         target_raw = current_price * 1.03
@@ -405,7 +402,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
 
         points = []
         
-        # 5MA
+        # 1. 5MA
         ma5_raw = hist['Close'].tail(5).mean()
         ma5 = apply_sr_rules(ma5_raw, current_price)
         
@@ -416,30 +413,22 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         
         points.append({"val": ma5, "tag": ma5_tag, "force": True})
 
-        # 當日
+        # 2. 當日關鍵點
         points.append({"val": apply_tick_rules(today['Open']), "tag": ""})
         points.append({"val": apply_tick_rules(today['High']), "tag": ""})
         points.append({"val": apply_tick_rules(today['Low']), "tag": ""})
         
-        # 昨日
-        points.append({"val": apply_tick_rules(prev_day['High']), "tag": ""})
-        points.append({"val": apply_tick_rules(prev_day['Low']), "tag": ""})
-        points.append({"val": apply_tick_rules(prev_day['Close']), "tag": ""})
+        # [修改] 3. 昨日高低/收
+        # 只有當這些點在合理範圍內 (明日漲跌停之間) 才顯示，避免顯示過舊且無意義的極值
+        p_close = apply_tick_rules(prev_day['Close'])
+        p_high = apply_tick_rules(prev_day['High'])
+        p_low = apply_tick_rules(prev_day['Low'])
         
-        # 昨日開盤 (條件顯示)
-        prev_o = apply_tick_rules(prev_day['Open'])
-        prev_h = apply_tick_rules(prev_day['High'])
-        prev_l = apply_tick_rules(prev_day['Low'])
-        if abs(prev_o - prev_h) < 0.01 or abs(prev_o - prev_l) < 0.01:
-            points.append({"val": prev_o, "tag": ""})
+        points.append({"val": p_close, "tag": ""})
+        if limit_down_next <= p_high <= limit_up_next: points.append({"val": p_high, "tag": ""})
+        if limit_down_next <= p_low <= limit_up_next: points.append({"val": p_low, "tag": ""})
         
-        # [恢復] 近5日高低 (不含今日)
-        if len(hist_prior) >= 5:
-            past_5 = hist_prior.tail(5)
-            points.append({"val": apply_tick_rules(past_5['High'].max()), "tag": ""})
-            points.append({"val": apply_tick_rules(past_5['Low'].min()), "tag": ""})
-        
-        # 近期高低 (90日)
+        # 4. 近期高低 (90日) - 強制包含今日
         high_90_raw = max(hist['High'].max(), today['High'], current_price)
         low_90_raw = min(hist['Low'].min(), today['Low'], current_price)
         
@@ -449,7 +438,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         points.append({"val": high_90, "tag": "高"})
         points.append({"val": low_90, "tag": "低"})
 
-        # 觸及
+        # 5. 觸及判斷
         touched_up = (today['High'] >= limit_up_today - 0.01) or (abs(current_price - limit_up_today) < 0.01)
         touched_down = (today['Low'] <= limit_down_today + 0.01) or (abs(current_price - limit_down_today) < 0.01)
         
@@ -469,7 +458,6 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         for p in points:
             v = float(f"{p['val']:.2f}")
             is_force = p.get('force', False)
-            # 篩選範圍
             if is_force or (limit_down_next <= v <= limit_up_next):
                  display_candidates.append(p) 
             
@@ -540,6 +528,9 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
 
 tab1, tab2 = st.tabs(["⚡ 當沖戰略室 ⚡", "💰 當沖損益室 💰"])
 
+# -------------------------------------------------------
+# Tab 1: 當沖戰略室
+# -------------------------------------------------------
 with tab1:
     col_search, col_file = st.columns([2, 1])
     with col_search:
@@ -561,77 +552,86 @@ with tab1:
                 except: pass
 
         with src_tab2:
-            cloud_url = st.text_input("輸入連結 (CSV/Excel/Google Sheet)", value=st.session_state.cloud_url, placeholder="https://...")
-            if cloud_url != st.session_state.cloud_url: st.session_state.cloud_url = cloud_url
-            
+            # [修改] 移除雲端匯入，因為爬蟲不穩定，統一使用本機上傳
+            st.info("💡 請直接從 Goodinfo 或 Yahoo 下載 CSV/XLS 檔案後，使用左側「本機」分頁上傳。")
+
         search_selection = st.multiselect("🔍 快速查詢 (中文/代號)", options=stock_options, placeholder="輸入 2330 或 台積電...")
 
-    if st.button("🚀 執行分析", type="primary"):
+    if st.button("🚀 執行分析", type="primary", use_container_width=True):
         targets = []
         df_up = pd.DataFrame()
         
-        # [新增] 讀取邏輯：CSV / HTML / XLS (Goodinfo)
         try:
             if uploaded_file:
                 uploaded_file.seek(0)
                 fname = uploaded_file.name.lower()
-                if fname.endswith('.csv'):
-                    # Goodinfo CSV 通常包含 ="xxxx" 格式
-                    df_up = pd.read_csv(uploaded_file, dtype=str)
-                elif fname.endswith('.html') or fname.endswith('.htm'):
-                    dfs = pd.read_html(uploaded_file, encoding='utf-8')
-                    if dfs: df_up = dfs[0] # 假設第一個表格是主要資料
-                elif fname.endswith('.xls') or fname.endswith('.xlsx'):
-                    try:
-                        df_up = pd.read_excel(uploaded_file, sheet_name=selected_sheet, dtype=str)
-                    except:
-                        # Goodinfo 的 .xls 經常其實是 HTML，嘗試用 read_html 讀取
-                        uploaded_file.seek(0)
-                        dfs = pd.read_html(uploaded_file, encoding='utf-8')
-                        if dfs: df_up = dfs[0]
                 
-            elif st.session_state.cloud_url:
-                url = st.session_state.cloud_url
-                if "docs.google.com" in url and "/spreadsheets/" in url and "/edit" in url:
-                    url = url.split("/edit")[0] + "/export?format=csv"
-                try: df_up = pd.read_csv(url, dtype=str)
-                except:
-                    try: df_up = pd.read_excel(url, dtype=str)
-                    except: st.error("❌ 無法讀取雲端檔案。")
+                # [新增] 強力解析 CSV/HTML/XLS
+                if fname.endswith('.csv'):
+                    try:
+                        df_up = pd.read_csv(uploaded_file, dtype=str, encoding='utf-8')
+                    except:
+                        uploaded_file.seek(0)
+                        df_up = pd.read_csv(uploaded_file, dtype=str, encoding='cp950') # 嘗試 Big5
+                        
+                elif fname.endswith('.html') or fname.endswith('.htm') or fname.endswith('.xls'):
+                    # Goodinfo 的 xls 其實是 html
+                    try:
+                        dfs = pd.read_html(uploaded_file, encoding='utf-8')
+                    except:
+                        uploaded_file.seek(0)
+                        dfs = pd.read_html(uploaded_file, encoding='cp950')
+                    
+                    # 尋找正確的表格 (包含代號與名稱)
+                    for df in dfs:
+                        if df.apply(lambda row: row.astype(str).str.contains('代號').any(), axis=1).any():
+                             df_up = df
+                             break
+                    if df_up.empty and dfs: df_up = dfs[0]
+                
+                elif fname.endswith('.xlsx'):
+                    df_up = pd.read_excel(uploaded_file, sheet_name=selected_sheet, dtype=str)
+
         except Exception as e: st.error(f"讀取失敗: {e}")
 
         if not df_up.empty:
-            # [新增] 自動尋找「代號」欄位
+            # [新增] 智慧欄位對應
             c_col = None
-            for col in df_up.columns:
-                if "代號" in str(col):
-                    c_col = col
-                    break
-            
             n_col = None
+            
+            # 尋找欄位名稱
             for col in df_up.columns:
-                if "名稱" in str(col):
-                    n_col = col
-                    break
-                    
+                c_str = str(col)
+                if "代號" in c_str: c_col = col
+                if "名稱" in c_str: n_col = col
+            
+            # 如果找不到，嘗試在第一列尋找
+            if not c_col:
+                # 重新讀取，將第一列設為 header
+                # 這裡做簡單處理：遍歷內容
+                pass
+
             if c_col:
-                # [新增] 限制匯入筆數
+                # 限制筆數
                 limit_rows = st.session_state.limit_rows
-                df_up = df_up.head(limit_rows)
-                
+                count = 0
                 for _, row in df_up.iterrows():
-                    # 清洗 Goodinfo 的 ="xxxx" 格式
                     c_raw = str(row[c_col]).replace('=', '').replace('"', '').strip()
-                    if not c_raw or c_raw.lower() == 'nan': continue
-                    # 過濾非股票代號
-                    if c_raw.isdigit():
-                        if len(c_raw) <= 3: c_raw = "00" + c_raw
-                    elif len(c_raw) == 4 and c_raw[0].isdigit() and c_raw[-1].isalpha(): c_raw = "00" + c_raw
-                    else: continue # 跳過非股票
                     
+                    # 過濾邏輯 (寬鬆版)
+                    is_valid = False
+                    if c_raw.isdigit():
+                         if len(c_raw) <= 4: is_valid = True # 股票
+                    elif len(c_raw) > 4 and c_raw[0].isdigit(): # ETF/Bond (ex: 00859B)
+                         is_valid = True
+                    
+                    if not is_valid: continue
+                    if count >= limit_rows: break # 達到筆數限制
+
                     n = str(row[n_col]) if n_col else ""
                     if n.lower() == 'nan': n = ""
                     targets.append((c_raw, n, 'upload', {}))
+                    count += 1
 
         if search_selection:
             for item in search_selection:
@@ -656,11 +656,8 @@ with tab1:
             if code in st.session_state.ignored_stocks: continue
             if (code, source) in seen: continue
             
-            if hide_non_stock:
-                if code.startswith("00"): continue
-                if len(code) > 4 and code.isdigit(): continue
-            
-            time.sleep(0.8) # 防止封鎖
+            # [修改] 隱藏非個股邏輯：這裡只擋明顯錯誤的，真正的隱藏在顯示層做
+            # 這樣才能讓 "隱藏非個股" checkbox 動態生效
             
             if code in fetch_cache: data = fetch_cache[code]
             else:
@@ -684,17 +681,25 @@ with tab1:
     if not st.session_state.stock_data.empty:
         limit = st.session_state.limit_rows
         df_all = st.session_state.stock_data.copy()
-        df_all = df_all.rename(columns={"漲停價": "當日漲停價", "跌停價": "當日跌停價"})
+        
+        rename_map = {"漲停價": "當日漲停價", "跌停價": "當日跌停價"}
+        df_all = df_all.rename(columns=rename_map)
+        
         df_all['代號'] = df_all['代號'].astype(str)
         df_all = df_all[~df_all['代號'].isin(st.session_state.ignored_stocks)]
         
         if hide_non_stock:
+             # 嚴格定義非個股：00開頭 或 長度>4且非純數字
              mask_etf = df_all['代號'].str.startswith('00')
-             mask_warrant = (df_all['代號'].str.len() > 4) & df_all['代號'].str.isdigit()
+             mask_warrant = (df_all['代號'].str.len() > 4) & df_all['代號'].str.isdigit() # 權證通常是6碼數字
+             # 保留 00859B 這種 (len>4 but not isdigit) ? 
+             # 不，ETF 通常 00 開頭。債券 ETF 也是 00 開頭。
+             # 00859B 會被 startswith('00') 抓到。
              df_all = df_all[~(mask_etf | mask_warrant)]
         
+        # [修改] 顯示順序：Upload (受 limit 限制) -> Search (全部)
         if '_source' in df_all.columns:
-            df_up = df_all[df_all['_source'] == 'upload'].head(limit)
+            df_up = df_all[df_all['_source'] == 'upload'].head(limit) # 這裡再次確保 limit
             df_se = df_all[df_all['_source'] == 'search']
             df_display = pd.concat([df_up, df_se]).reset_index(drop=True)
         else:
@@ -705,12 +710,15 @@ with tab1:
         df_display["移除"] = False
         
         input_cols = ["移除", "代號", "名稱", "戰略備註", "自訂價(可修)", "狀態", "當日漲停價", "當日跌停價", "+3%", "-3%", "收盤價", "漲跌幅", "_points"]
+        df_display = df_display.rename(columns={"獲利目標": "+3%", "防守停損": "-3%"})
+
         for col in input_cols:
             if col not in df_display.columns and col != "_points": df_display[col] = None
 
         cols_to_fmt = ["收盤價", "當日漲停價", "當日跌停價", "+3%", "-3%", "自訂價(可修)"]
         for c in cols_to_fmt:
-            if c in df_display.columns: df_display[c] = df_display[c].apply(fmt_price)
+            if c in df_display.columns:
+                df_display[c] = df_display[c].apply(fmt_price)
 
         edited_df = st.data_editor(
             df_display[input_cols],
@@ -729,7 +737,10 @@ with tab1:
                 "戰略備註": st.column_config.TextColumn(width=note_width_px, disabled=False),
                 "_points": None 
             },
-            hide_index=True, use_container_width=False, num_rows="fixed", key="main_editor"
+            hide_index=True, 
+            use_container_width=False,
+            num_rows="fixed",
+            key="main_editor"
         )
         
         col_btn, _ = st.columns([2, 8])
@@ -769,6 +780,9 @@ with tab1:
             if should_update or manual_update:
                 st.rerun()
 
+# -------------------------------------------------------
+# Tab 2: 當沖損益室
+# -------------------------------------------------------
 with tab2:
     st.markdown("#### 💰 當沖損益室 💰")
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -830,12 +844,14 @@ with tab2:
         roi = 0
         if (base_p * shares) != 0: roi = (profit / (base_p * shares)) * 100
         diff = p - base_p
+        
         diff_str = f"{diff:+.2f}".rstrip('0').rstrip('.') if diff != 0 else "0"
         if diff > 0 and not diff_str.startswith('+'): diff_str = "+" + diff_str
         
         note_type = ""
         if abs(p - limit_up) < 0.001: note_type = "up"
         elif abs(p - limit_down) < 0.001: note_type = "down"
+        
         is_base = (abs(p - base_p) < 0.001)
         
         calc_data.append({
@@ -844,8 +860,11 @@ with tab2:
         })
         
     df_calc = pd.DataFrame(calc_data)
+    
     def style_calc_row(row):
-        if row['_is_base']: return ['background-color: #ffffcc; color: black; font-weight: bold; border: 2px solid #ffd700;'] * len(row)
+        if row['_is_base']:
+            return ['background-color: #ffffcc; color: black; font-weight: bold; border: 2px solid #ffd700;'] * len(row)
+            
         nt = row['_note_type']
         if nt == 'up': return ['background-color: #ff4b4b; color: white; font-weight: bold'] * len(row)
         elif nt == 'down': return ['background-color: #00cc00; color: white; font-weight: bold'] * len(row)
@@ -855,8 +874,14 @@ with tab2:
         else: return ['color: gray'] * len(row)
 
     if not df_calc.empty:
-        table_height = (len(df_calc) + 1) * 35 
+        row_height = 35
+        header_height = 40
+        table_height = (len(df_calc) + 1) * row_height 
+        
         st.dataframe(
-            df_calc.style.apply(style_calc_row, axis=1), use_container_width=False, hide_index=True, height=table_height,
+            df_calc.style.apply(style_calc_row, axis=1), 
+            use_container_width=False, 
+            hide_index=True, 
+            height=table_height,
             column_config={"_profit": None, "_note_type": None, "_is_base": None}
         )
