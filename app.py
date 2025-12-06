@@ -23,6 +23,7 @@ st.title("⚡ 當沖戰略室 ⚡")
 
 CONFIG_FILE = "config.json"
 DATA_CACHE_FILE = "data_cache.json"
+URL_CACHE_FILE = "url_cache.json"  # [新增] 網址記憶檔案
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -60,6 +61,23 @@ def load_data_cache():
         except: return pd.DataFrame(), set()
     return pd.DataFrame(), set()
 
+# [新增] 網址記憶功能
+def load_saved_url():
+    if os.path.exists(URL_CACHE_FILE):
+        try:
+            with open(URL_CACHE_FILE, "r", encoding='utf-8') as f:
+                data = json.load(f)
+                return data.get("url", "")
+        except: return ""
+    return ""
+
+def save_saved_url(url):
+    try:
+        with open(URL_CACHE_FILE, "w", encoding='utf-8') as f:
+            json.dump({"url": url}, f)
+        return True
+    except: return False
+
 # --- 初始化 Session State ---
 if 'stock_data' not in st.session_state:
     cached_df, cached_ignored = load_data_cache()
@@ -75,11 +93,9 @@ if 'calc_base_price' not in st.session_state:
 if 'calc_view_price' not in st.session_state:
     st.session_state.calc_view_price = 100.0
 
+# 初始化雲端網址變數
 if 'cloud_url_input' not in st.session_state:
-    st.session_state.cloud_url_input = ""
-
-if 'cloud_url' not in st.session_state:
-    st.session_state.cloud_url = ""
+    st.session_state.cloud_url_input = load_saved_url() # 預設載入記憶的網址
 
 saved_config = load_config()
 
@@ -102,7 +118,6 @@ with st.sidebar:
     )
     st.session_state.font_size = current_font_size
     
-    # 這是使用者勾選的隱藏選項
     hide_non_stock = st.checkbox("隱藏非個股 (ETF/權證/債券)", value=True)
     
     st.markdown("---")
@@ -130,7 +145,7 @@ with st.sidebar:
             st.toast("已重置忽略名單。", icon="🔄")
             st.rerun()
     with col_clear:
-        if st.button("🗑️ 清空", type="primary", use_container_width=True):
+        if st.button("🗑️ 清空", type="primary", use_container_width=True, help="清空所有分析資料 (不會刪除記憶的網址)"):
             st.session_state.stock_data = pd.DataFrame()
             st.session_state.ignored_stocks = set()
             if os.path.exists(DATA_CACHE_FILE):
@@ -139,7 +154,7 @@ with st.sidebar:
             st.rerun()
     
     st.caption("功能說明")
-    st.info("🗑️ **如何刪除股票？**\n\n在表格左側勾選「刪除」框，該股票將被隱藏。")
+    st.info("🗑️ **如何刪除股票？**\n\n在表格左側勾選「刪除」框，然後點擊表格下方的更新按鈕。")
 
 # --- 動態 CSS ---
 font_px = f"{st.session_state.font_size}px"
@@ -495,17 +510,30 @@ with tab1:
                 except: pass
 
         with src_tab2:
-            def update_url():
-                 st.session_state.cloud_url = st.session_state.cloud_url_input
+            # [修改] 增加記憶與刪除按鈕的佈局
+            c_url, c_save, c_del = st.columns([8, 1, 1])
             
-            st.text_input(
-                "輸入連結 (CSV/Excel/Google Sheet)", 
-                key="cloud_url_input",
-                value=st.session_state.cloud_url,
-                on_change=update_url,
-                placeholder="https://..."
-            )
+            with c_url:
+                st.text_input(
+                    "輸入連結 (CSV/Excel/Google Sheet)", 
+                    key="cloud_url_input",
+                    placeholder="https://...",
+                    label_visibility="collapsed"
+                )
             
+            with c_save:
+                if st.button("💾", help="記憶此連結 (清空資料時會保留)"):
+                    url_to_save = st.session_state.cloud_url_input
+                    if save_saved_url(url_to_save):
+                        st.toast("連結已記憶！", icon="💾")
+            
+            with c_del:
+                if st.button("🗑️", help="刪除記憶的連結"):
+                    if save_saved_url(""):
+                        st.session_state.cloud_url_input = ""
+                        st.toast("連結記憶已清除。", icon="🗑️")
+                        st.rerun()
+
         search_selection = st.multiselect("🔍 快速查詢 (中文/代號)", options=stock_options, placeholder="輸入 2330 或 台積電...")
 
     if st.button("🚀 執行分析"):
@@ -561,9 +589,7 @@ with tab1:
                 limit_rows = st.session_state.limit_rows
                 count = 0
                 
-                # --- [修正邏輯] 預先過濾，確保補齊顯示筆數 ---
                 for _, row in df_up.iterrows():
-                    # 1. 解析代號
                     c_raw = str(row[c_col]).replace('=', '').replace('"', '').strip()
                     if not c_raw or c_raw.lower() == 'nan': continue
                     is_valid = False
@@ -571,19 +597,15 @@ with tab1:
                     elif len(c_raw) > 0 and (c_raw[0].isdigit() or c_raw[0] in ['0','00']): is_valid = True
                     if not is_valid: continue
                     
-                    # 2. 檢查是否在「忽略名單」中 (若在則跳過)
                     if c_raw in st.session_state.ignored_stocks: continue
                     
-                    # 3. 檢查「隱藏非個股」設定 (若開啟且符合非個股特徵則跳過)
                     if hide_non_stock:
                         is_etf = c_raw.startswith('00')
                         is_warrant = (len(c_raw) > 4) and c_raw.isdigit()
                         if is_etf or is_warrant: continue
                     
-                    # 4. 如果名額已滿，則停止搜尋
                     if count >= limit_rows: break 
                     
-                    # 5. 通過所有檢查，加入分析清單
                     n = str(row[n_col]) if n_col else ""
                     if n.lower() == 'nan': n = ""
                     targets.append((c_raw, n, 'upload', count))
@@ -669,95 +691,63 @@ with tab1:
              if col != "移除": df_display[col] = df_display[col].astype(str)
 
         # ------------------------------------------------------------------
-        # [Callback] 使用者編輯表格時觸發的邏輯
+        # [修改] 使用 st.form (Batch Mode) 解決輸入重整問題
         # ------------------------------------------------------------------
-        def on_editor_change():
-            """
-            當表格內容變動時觸發此函數。
-            邏輯：
-            1. 中間列的修改 -> 靜默更新 Session State，不重算，不中斷。
-            2. 最後一列的修改 -> 觸發所有列的狀態計算，Streamlit 自動重整畫面。
-            """
-            state = st.session_state["main_editor"]
-            edited_rows = state.get("edited_rows", {})
+        with st.form("entry_form"):
+            # 在 Form 裡面的 data_editor 只有在按下 Submit 時才會回傳變更
+            # 這樣可以完全避免輸入時的頁面閃爍或重整
+            edited_df = st.data_editor(
+                df_display[input_cols],
+                column_config={
+                    "移除": st.column_config.CheckboxColumn("刪除", width=30),
+                    "代號": st.column_config.TextColumn(disabled=True, width=50),
+                    "名稱": st.column_config.TextColumn(disabled=True, width="small"),
+                    "收盤價": st.column_config.TextColumn(width="small", disabled=True),
+                    "漲跌幅": st.column_config.NumberColumn(format="%.2f%%", disabled=True, width="small"),
+                    "自訂價(可修)": st.column_config.TextColumn("自訂價 ✏️", width=60),
+                    "當日漲停價": st.column_config.TextColumn(width="small", disabled=True),
+                    "當日跌停價": st.column_config.TextColumn(width="small", disabled=True),
+                    "+3%": st.column_config.TextColumn(width="small", disabled=True),
+                    "-3%": st.column_config.TextColumn(width="small", disabled=True),
+                    "狀態": st.column_config.TextColumn(width=60, disabled=True),
+                    "戰略備註": st.column_config.TextColumn(width=note_width_px, disabled=False),
+                },
+                hide_index=True, 
+                use_container_width=False, 
+                num_rows="fixed", 
+                key="main_editor"
+            )
             
-            # 建立顯示索引對應到原始數據的索引
-            display_to_source_map = {} 
-            for disp_idx, row in df_display.iterrows():
+            # 提交按鈕
+            col_btn, _ = st.columns([2, 8])
+            with col_btn:
+                submit_update = st.form_submit_button("⚡ 更新狀態 & 儲存變更", use_container_width=True, type="primary")
+
+        if submit_update:
+            # 當使用者按下更新按鈕時，才執行以下邏輯
+            
+            # 1. 處理「移除」勾選
+            if '移除' in edited_df.columns and edited_df['移除'].any():
+                 to_remove = edited_df[edited_df['移除'] == True]['代號'].unique()
+                 st.session_state.ignored_stocks.update(to_remove)
+                 save_data_cache(st.session_state.stock_data, st.session_state.ignored_stocks)
+            
+            # 2. 更新 Session State 中的自訂價與備註
+            # 我們使用 '代號' 作為 Key 來對應，避免 Index 錯位
+            update_map = edited_df.set_index('代號')[['自訂價(可修)', '戰略備註']].to_dict('index')
+            
+            for i, row in st.session_state.stock_data.iterrows():
                 code = row['代號']
-                src_indices = st.session_state.stock_data.index[st.session_state.stock_data['代號'] == code].tolist()
-                if src_indices:
-                    display_to_source_map[disp_idx] = src_indices[0]
-
-            need_recalc_all = False
-            last_row_idx = len(df_display) - 1
-
-            for idx, changes in edited_rows.items():
-                idx = int(idx)
-                if idx not in display_to_source_map: continue
-                src_idx = display_to_source_map[idx]
-                
-                # A. 刪除
-                if "移除" in changes and changes["移除"] is True:
-                     code_to_remove = df_display.at[idx, '代號']
-                     st.session_state.ignored_stocks.add(code_to_remove)
-                     save_data_cache(st.session_state.stock_data, st.session_state.ignored_stocks)
-                
-                # B. 修改內容
-                for col, val in changes.items():
-                    if col in ['自訂價(可修)', '戰略備註']:
-                        st.session_state.stock_data.at[src_idx, col] = val
-                        df_display.at[idx, col] = val
-                
-                # C. [重點邏輯] 如果是「最後一列」修改了自訂價 -> 標記需要重算全表
-                if idx == last_row_idx and '自訂價(可修)' in changes:
-                    need_recalc_all = True
+                if code in update_map:
+                    st.session_state.stock_data.at[i, '自訂價(可修)'] = update_map[code]['自訂價(可修)']
+                    st.session_state.stock_data.at[i, '戰略備註'] = update_map[code]['戰略備註']
             
-            # 防呆檢查：若最後一列已有值但狀態仍空，也觸發重算
-            last_val = df_display.at[last_row_idx, '自訂價(可修)']
-            last_status = df_display.at[last_row_idx, '狀態']
-            if pd.notna(last_val) and str(last_val).strip() != "" and str(last_val).strip() != "None" and (pd.isna(last_status) or str(last_status) == ""):
-                need_recalc_all = True
-
-            # D. 若需要重算，更新所有列的狀態
-            if need_recalc_all:
-                for i, row in st.session_state.stock_data.iterrows():
-                    new_status = recalculate_row(row, points_map)
-                    st.session_state.stock_data.at[i, '狀態'] = new_status
+            # 3. 全面重算狀態
+            for i, row in st.session_state.stock_data.iterrows():
+                new_status = recalculate_row(row, points_map)
+                st.session_state.stock_data.at[i, '狀態'] = new_status
             
-            # Callback 結束後，Streamlit 會自動執行一次 Rerun
-
-        st.data_editor(
-            df_display[input_cols],
-            column_config={
-                "移除": st.column_config.CheckboxColumn("刪除", width=30),
-                "代號": st.column_config.TextColumn(disabled=True, width=50),
-                "名稱": st.column_config.TextColumn(disabled=True, width="small"),
-                "收盤價": st.column_config.TextColumn(width="small", disabled=True),
-                "漲跌幅": st.column_config.NumberColumn(format="%.2f%%", disabled=True, width="small"),
-                "自訂價(可修)": st.column_config.TextColumn("自訂價 ✏️", width=60),
-                "當日漲停價": st.column_config.TextColumn(width="small", disabled=True),
-                "當日跌停價": st.column_config.TextColumn(width="small", disabled=True),
-                "+3%": st.column_config.TextColumn(width="small", disabled=True),
-                "-3%": st.column_config.TextColumn(width="small", disabled=True),
-                "狀態": st.column_config.TextColumn(width=60, disabled=True),
-                "戰略備註": st.column_config.TextColumn(width=note_width_px, disabled=False),
-            },
-            hide_index=True, 
-            use_container_width=False, 
-            num_rows="fixed", 
-            key="main_editor",
-            on_change=on_editor_change
-        )
-        
-        # [修改] 按鈕縮小並調整位置
-        col_btn, _ = st.columns([1, 10])
-        with col_btn:
-             if st.button("⚡ 更新狀態", help="手動重新計算狀態"):
-                 for i, row in st.session_state.stock_data.iterrows():
-                    new_status = recalculate_row(row, points_map)
-                    st.session_state.stock_data.at[i, '狀態'] = new_status
-                 st.rerun()
+            st.rerun()
 
 with tab2:
     st.markdown("#### 💰 當沖損益室 💰")
