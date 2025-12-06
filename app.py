@@ -11,6 +11,7 @@ import json
 from datetime import datetime, time as dt_time
 import pytz
 from decimal import Decimal, ROUND_HALF_UP
+import io
 
 # ==========================================
 # 0. 頁面設定與初始化
@@ -74,7 +75,6 @@ if 'calc_base_price' not in st.session_state:
 if 'calc_view_price' not in st.session_state:
     st.session_state.calc_view_price = 100.0
 
-# [還原] 雲端網址狀態
 if 'cloud_url' not in st.session_state:
     st.session_state.cloud_url = ""
 
@@ -157,24 +157,9 @@ def load_local_stock_names():
 @st.cache_data(ttl=86400)
 def get_stock_name_online(code):
     code = str(code).strip()
-    if not code.isdigit(): return code
     code_map, _ = load_local_stock_names()
     if code in code_map: return code_map[code]
-    try:
-        url = f"https://tw.stock.yahoo.com/quote/{code}.TW"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        r = requests.get(url, headers=headers, timeout=2)
-        soup = BeautifulSoup(r.text, "html.parser")
-        if soup.title and "(" in soup.title.string:
-            return soup.title.string.split('(')[0].strip()
-        url_two = f"https://tw.stock.yahoo.com/quote/{code}.TWO"
-        r_two = requests.get(url_two, headers=headers, timeout=2)
-        soup_two = BeautifulSoup(r_two.text, "html.parser")
-        if soup_two.title and "(" in soup_two.title.string:
-            return soup_two.title.string.split('(')[0].strip()
-        return code
-    except:
-        return code
+    return code
 
 @st.cache_data(ttl=86400)
 def search_code_online(query):
@@ -182,18 +167,6 @@ def search_code_online(query):
     if query.isdigit(): return query
     _, name_map = load_local_stock_names()
     if query in name_map: return name_map[query]
-    try:
-        url = f"https://tw.stock.yahoo.com/h/kimosearch/search_list.html?keyword={query}"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        r = requests.get(url, headers=headers, timeout=2)
-        soup = BeautifulSoup(r.text, "html.parser")
-        links = soup.find_all('a', href=True)
-        for link in links:
-            if "/quote/" in link['href'] and ".TW" in link['href']:
-                parts = link['href'].split("/quote/")[1].split(".")
-                if parts[0].isdigit(): return parts[0]
-    except:
-        pass
     return None
 
 # ==========================================
@@ -201,8 +174,10 @@ def search_code_online(query):
 # ==========================================
 
 def get_tick_size(price):
-    try: price = float(price)
-    except: return 0.01
+    try:
+        price = float(price)
+    except:
+        return 0.01
     if pd.isna(price) or price <= 0: return 0.01
     if price < 10: return 0.01
     if price < 50: return 0.05
@@ -298,8 +273,6 @@ def recalculate_row(row):
 def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     code = str(code).strip()
     try:
-        time.sleep(0.8) # 智慧延遲
-        
         ticker = yf.Ticker(f"{code}.TW")
         hist = ticker.history(period="3mo") 
         if hist.empty:
@@ -340,23 +313,32 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
 
         points = []
         
+        # 5MA
         ma5_raw = hist['Close'].tail(5).mean()
         ma5 = apply_sr_rules(ma5_raw, current_price)
         ma5_tag = "多" if ma5_raw < current_price else ("空" if ma5_raw > current_price else "平")
         points.append({"val": ma5, "tag": ma5_tag, "force": True})
 
+        # 當日
         points.append({"val": apply_tick_rules(today['Open']), "tag": ""})
         points.append({"val": apply_tick_rules(today['High']), "tag": ""})
         points.append({"val": apply_tick_rules(today['Low']), "tag": ""})
         
-        p_close = apply_tick_rules(prev_day['Close'])
+        # 昨日
         p_high = apply_tick_rules(prev_day['High'])
         p_low = apply_tick_rules(prev_day['Low'])
         
-        points.append({"val": p_close, "tag": ""})
+        points.append({"val": apply_tick_rules(prev_day['Close']), "tag": ""})
         if limit_down_next <= p_high <= limit_up_next: points.append({"val": p_high, "tag": ""})
         if limit_down_next <= p_low <= limit_up_next: points.append({"val": p_low, "tag": ""})
         
+        # 近5日高低 (不含今日)
+        if len(hist_prior) >= 5:
+            past_5 = hist_prior.tail(5)
+            points.append({"val": apply_tick_rules(past_5['High'].max()), "tag": ""})
+            points.append({"val": apply_tick_rules(past_5['Low'].min()), "tag": ""})
+        
+        # 近期高低 (90日)
         high_90_raw = max(hist['High'].max(), today['High'], current_price)
         low_90_raw = min(hist['Low'].min(), today['Low'], current_price)
         high_90 = apply_tick_rules(high_90_raw)
@@ -365,6 +347,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         points.append({"val": high_90, "tag": "高"})
         points.append({"val": low_90, "tag": "低"})
 
+        # 觸及
         touched_up = (today['High'] >= limit_up_today - 0.01) or (abs(current_price - limit_up_today) < 0.01)
         touched_down = (today['Low'] <= limit_down_today + 0.01) or (abs(current_price - limit_down_today) < 0.01)
         
@@ -452,14 +435,13 @@ with tab1:
         code_map, name_map = load_local_stock_names()
         stock_options = [f"{code} {name}" for code, name in sorted(code_map.items())]
         
-        # [還原] 恢復雲端匯入 Tab
         src_tab1, src_tab2 = st.tabs(["📂 本機", "☁️ 雲端"])
         with src_tab1:
             uploaded_file = st.file_uploader("上傳檔案 (CSV/XLS/HTML)", type=['xlsx', 'csv', 'html', 'xls'], label_visibility="collapsed")
             selected_sheet = 0
             if uploaded_file:
                 try:
-                    if uploaded_file.name.endswith('.xlsx'):
+                    if not uploaded_file.name.endswith('.csv'):
                         xl_file = pd.ExcelFile(uploaded_file)
                         sheet_options = xl_file.sheet_names
                         default_idx = 0
@@ -468,23 +450,16 @@ with tab1:
                 except: pass
 
         with src_tab2:
-            # [還原] 雲端連結輸入框
-            cloud_url_input = st.text_input(
-                "輸入連結 (CSV/Excel/Google Sheet)", 
-                value=st.session_state.cloud_url, 
-                placeholder="https://..."
-            )
-            if cloud_url_input != st.session_state.cloud_url:
-                st.session_state.cloud_url = cloud_url_input
+            cloud_url_input = st.text_input("輸入連結 (CSV/Excel/Google Sheet)", value=st.session_state.cloud_url, placeholder="https://...")
+            if cloud_url_input != st.session_state.cloud_url: st.session_state.cloud_url = cloud_url_input
             
         search_selection = st.multiselect("🔍 快速查詢 (中文/代號)", options=stock_options, placeholder="輸入 2330 或 台積電...")
 
-    if st.button("🚀 執行分析", type="primary", use_container_width=True):
+    # [修改] 還原按鈕樣式
+    if st.button("🚀 執行分析"):
         targets = []
         df_up = pd.DataFrame()
-        
         try:
-            # [修復] 處理 Goodinfo 檔案 (CSV/HTML/XLS)
             if uploaded_file:
                 uploaded_file.seek(0)
                 fname = uploaded_file.name.lower()
@@ -494,18 +469,15 @@ with tab1:
                     except: 
                         uploaded_file.seek(0)
                         df_up = pd.read_csv(uploaded_file, dtype=str)
-                
+                        
                 elif fname.endswith('.html') or fname.endswith('.htm') or fname.endswith('.xls'):
                     try: dfs = pd.read_html(uploaded_file, encoding='cp950')
                     except:
                         uploaded_file.seek(0)
                         dfs = pd.read_html(uploaded_file, encoding='utf-8')
-                    
-                    # 尋找正確表格
                     for df in dfs:
                         if df.apply(lambda r: r.astype(str).str.contains('代號').any(), axis=1).any():
                              df_up = df
-                             # 尋找 header 列
                              for i, row in df.iterrows():
                                  if "代號" in row.values:
                                      df_up.columns = row
@@ -513,7 +485,7 @@ with tab1:
                                      break
                              break
                     if df_up.empty and dfs: df_up = dfs[0]
-                    
+                
                 elif fname.endswith('.xlsx'):
                     df_up = pd.read_excel(uploaded_file, sheet_name=selected_sheet, dtype=str)
 
@@ -528,31 +500,21 @@ with tab1:
         except Exception as e: st.error(f"讀取失敗: {e}")
 
         if not df_up.empty:
-            # 欄位名稱標準化
-            df_up.columns = df_up.columns.astype(str).str.strip()
-            
-            c_col = next((c for c in df_up.columns if "代號" in c), None)
-            n_col = next((c for c in df_up.columns if "名稱" in c), None)
-            
+            c_col = next((c for c in df_up.columns if "代號" in str(c)), None)
+            n_col = next((c for c in df_up.columns if "名稱" in str(c)), None)
             if c_col:
-                limit_rows = st.session_state.limit_rows
-                count = 0
+                # [修改] 抓取時不限制 limit_rows，全部抓取
                 for _, row in df_up.iterrows():
                     c_raw = str(row[c_col]).replace('=', '').replace('"', '').strip()
                     if not c_raw or c_raw.lower() == 'nan': continue
-                    
-                    # 寬鬆過濾：允許 ETF/債券
                     is_valid = False
                     if c_raw.isdigit() and len(c_raw) <= 4: is_valid = True
                     elif len(c_raw) > 0 and (c_raw[0].isdigit() or c_raw[0] in ['0','00']): is_valid = True
-                    
                     if not is_valid: continue
-                    if count >= limit_rows: break
                     
                     n = str(row[n_col]) if n_col else ""
                     if n.lower() == 'nan': n = ""
                     targets.append((c_raw, n, 'upload', {}))
-                    count += 1
 
         if search_selection:
             for item in search_selection:
@@ -614,6 +576,7 @@ with tab1:
              mask_warrant = (df_all['代號'].str.len() > 4) & df_all['代號'].str.isdigit()
              df_all = df_all[~(mask_etf | mask_warrant)]
         
+        # [修改] 顯示邏輯：上傳依 limit 顯示，搜尋全部顯示
         if '_source' in df_all.columns:
             df_up = df_all[df_all['_source'] == 'upload'].head(limit)
             df_se = df_all[df_all['_source'] == 'search']
@@ -622,7 +585,6 @@ with tab1:
             df_display = df_all.head(limit).reset_index(drop=True)
         
         note_width_px = calculate_note_width(df_display['戰略備註'], current_font_size)
-
         df_display["移除"] = False
         
         input_cols = ["移除", "代號", "名稱", "戰略備註", "自訂價(可修)", "狀態", "當日漲停價", "當日跌停價", "+3%", "-3%", "收盤價", "漲跌幅", "_points"]
@@ -632,6 +594,9 @@ with tab1:
         cols_to_fmt = ["收盤價", "當日漲停價", "當日跌停價", "+3%", "-3%", "自訂價(可修)"]
         for c in cols_to_fmt:
             if c in df_display.columns: df_display[c] = df_display[c].apply(fmt_price)
+
+        # [修正] 重置 index 以修復 KEYBOARD_DOUBLE_ARROW_RIGHT
+        df_display = df_display.reset_index(drop=True)
 
         edited_df = st.data_editor(
             df_display[input_cols],
