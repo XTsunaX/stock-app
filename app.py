@@ -78,6 +78,9 @@ if 'calc_view_price' not in st.session_state:
 if 'cloud_url_input' not in st.session_state:
     st.session_state.cloud_url_input = ""
 
+if 'cloud_url' not in st.session_state:
+    st.session_state.cloud_url = ""
+
 saved_config = load_config()
 
 if 'font_size' not in st.session_state:
@@ -141,8 +144,6 @@ with st.sidebar:
 font_px = f"{st.session_state.font_size}px"
 zoom_level = current_font_size / 14.0
 
-# [修正 1] 嚴格限制 CSS 作用範圍，只針對 stDataFrame 內部
-# 移除了對外部 button, i, svg 的干擾，讓側邊欄圖標恢復原狀
 st.markdown(f"""
     <style>
     /* 表格容器縮放 */
@@ -493,7 +494,6 @@ with tab1:
                 except: pass
 
         with src_tab2:
-            # [修正 3] 連結記憶
             def update_url():
                  st.session_state.cloud_url = st.session_state.cloud_url_input
             
@@ -634,9 +634,7 @@ with tab1:
             df_all = df_all.sort_values(by=['_source_rank', '_order'])
         
         df_display = df_all.reset_index(drop=True)
-        
         note_width_px = calculate_note_width(df_display['戰略備註'], current_font_size)
-
         df_display["移除"] = False
         
         points_map = {}
@@ -655,10 +653,68 @@ with tab1:
         for col in input_cols:
              if col != "移除": df_display[col] = df_display[col].astype(str)
 
-       # ... (前段設定 column_config 等程式碼保持不變) ...
+        # ------------------------------------------------------------------
+        # [Callback] 使用者編輯表格時觸發的邏輯
+        # ------------------------------------------------------------------
+        def on_editor_change():
+            """
+            當表格內容變動時觸發此函數。
+            邏輯：
+            1. 中間列的修改 -> 靜默更新 Session State，不重算，不中斷。
+            2. 最後一列的修改 -> 觸發所有列的狀態計算，Streamlit 自動重整畫面。
+            """
+            state = st.session_state["main_editor"]
+            edited_rows = state.get("edited_rows", {})
+            
+            # 建立顯示索引對應到原始數據的索引
+            display_to_source_map = {} 
+            for disp_idx, row in df_display.iterrows():
+                code = row['代號']
+                src_indices = st.session_state.stock_data.index[st.session_state.stock_data['代號'] == code].tolist()
+                if src_indices:
+                    display_to_source_map[disp_idx] = src_indices[0]
 
-        # 顯示表格並獲取使用者輸入
-        edited_df = st.data_editor(
+            need_recalc_all = False
+            last_row_idx = len(df_display) - 1
+
+            for idx, changes in edited_rows.items():
+                idx = int(idx)
+                if idx not in display_to_source_map: continue
+                src_idx = display_to_source_map[idx]
+                
+                # A. 刪除
+                if "移除" in changes and changes["移除"] is True:
+                     code_to_remove = df_display.at[idx, '代號']
+                     st.session_state.ignored_stocks.add(code_to_remove)
+                     save_data_cache(st.session_state.stock_data, st.session_state.ignored_stocks)
+                
+                # B. 修改內容
+                for col, val in changes.items():
+                    if col in ['自訂價(可修)', '戰略備註']:
+                        st.session_state.stock_data.at[src_idx, col] = val
+                        df_display.at[idx, col] = val
+                
+                # C. 如果是最後一列修改了自訂價 -> 標記需要重算
+                if idx == last_row_idx and '自訂價(可修)' in changes:
+                    need_recalc_all = True
+            
+            # 防呆檢查：若最後一列已有值但狀態仍空，也觸發重算
+            last_val = df_display.at[last_row_idx, '自訂價(可修)']
+            last_status = df_display.at[last_row_idx, '狀態']
+            if pd.notna(last_val) and str(last_val).strip() != "" and str(last_val).strip() != "None" and (pd.isna(last_status) or str(last_status) == ""):
+                need_recalc_all = True
+
+            # D. 若需要重算，更新所有列的狀態
+            if need_recalc_all:
+                for i, row in st.session_state.stock_data.iterrows():
+                    new_status = recalculate_row(row, points_map)
+                    st.session_state.stock_data.at[i, '狀態'] = new_status
+            
+            # Callback 結束後，Streamlit 會自動執行一次 Rerun，
+            # 若 need_recalc_all 為 False，因為沒有修改其他 state 觸發組件重繪，
+            # 通常不會造成全頁重整，僅會默默更新資料。
+
+        st.data_editor(
             df_display[input_cols],
             column_config={
                 "移除": st.column_config.CheckboxColumn("刪除", width=30),
@@ -674,77 +730,19 @@ with tab1:
                 "狀態": st.column_config.TextColumn(width=60, disabled=True),
                 "戰略備註": st.column_config.TextColumn(width=note_width_px, disabled=False),
             },
-            hide_index=True, use_container_width=False, num_rows="fixed", key="main_editor"
+            hide_index=True, 
+            use_container_width=False, 
+            num_rows="fixed", 
+            key="main_editor",
+            on_change=on_editor_change
         )
         
         col_btn, _ = st.columns([2, 8])
-        manual_update = col_btn.button("⚡ 立即更新狀態", use_container_width=True)
-        
-        # 處理刪除勾選
-        if edited_df['移除'].any():
-            removed_codes = edited_df[edited_df['移除']]['代號'].unique()
-            if len(removed_codes) > 0:
-                st.session_state.ignored_stocks.update(removed_codes)
-                save_data_cache(st.session_state.stock_data, st.session_state.ignored_stocks)
-                st.rerun()
-        
-        # --- [關鍵邏輯開始] 狀態更新機制 ---
-        
-        # 1. 先根據目前表格上的所有價格，預先計算好每一列的新狀態
-        updated_rows = []
-        for idx, row in edited_df.iterrows():
-            # 使用目前的自訂價來計算狀態 (就算還沒顯示在畫面上，也會先算好)
-            new_status = recalculate_row(row, points_map)
-            row['狀態'] = new_status
-            updated_rows.append(row)
-
-        # 2. 判斷是否需要「自動重整」
-        should_auto_rerun = False
-        
-        # 只有當表格有資料時才檢查
-        if len(edited_df) > 0:
-            # 取得「最後一列」的索引
-            last_row_idx = len(edited_df) - 1
-            
-            # 取得最後一列目前輸入的價格
-            last_price = str(edited_df.iloc[last_row_idx]['自訂價(可修)']).strip()
-            
-            # 檢查最後一列是否有輸入價格 (不是空的)
-            if last_price and last_price != "nan" and last_price != "None":
-                 # 比對「原本顯示的價格」和「現在輸入的價格」
-                 # orig_last_price 來自 df_display (尚未更新前的狀態)
-                 orig_last_price = str(df_display.iloc[last_row_idx]['自訂價(可修)']).strip()
-                 
-                 # 如果最後一列的價格發生了變化 (代表使用者剛打完最後一檔)
-                 if last_price != orig_last_price:
-                     should_auto_rerun = True
-
-        # 3. 執行更新動作
-        if manual_update or should_auto_rerun:
-            # 情況 A: 按下按鈕 或 修改了最後一列 -> 全面更新並重整頁面
-            df_updated = pd.DataFrame(updated_rows)
-            
-            # 將計算好的「狀態」和「價格」寫回 session_state
-            update_map = df_updated.set_index('代號')[['自訂價(可修)', '狀態', '戰略備註']].to_dict('index')
-            for i, r in st.session_state.stock_data.iterrows():
-                code = r['代號']
-                if code in update_map:
-                    st.session_state.stock_data.at[i, '自訂價(可修)'] = update_map[code]['自訂價(可修)']
-                    st.session_state.stock_data.at[i, '狀態'] = update_map[code]['狀態']
-                    st.session_state.stock_data.at[i, '戰略備註'] = update_map[code]['戰略備註']
-            
-            # 觸發頁面刷新，讓使用者看到所有狀態
-            st.rerun()
-            
-        else:
-            # 情況 B: 修改中間的列 (第 1~4 檔) -> 靜默儲存，不重整
-            # 這樣做可以確保資料不會遺失，且輸入焦點不會跑掉
-            temp_map = pd.DataFrame(updated_rows).set_index('代號')['自訂價(可修)'].to_dict()
-            for i, r in st.session_state.stock_data.iterrows():
-                code = r['代號']
-                if code in temp_map:
-                    # 只更新價格，不更新狀態，也不 rerun
-                    st.session_state.stock_data.at[i, '自訂價(可修)'] = temp_map[code]
+        if st.button("⚡ 強制更新狀態", use_container_width=True):
+             for i, row in st.session_state.stock_data.iterrows():
+                new_status = recalculate_row(row, points_map)
+                st.session_state.stock_data.at[i, '狀態'] = new_status
+             st.rerun()
 
 with tab2:
     st.markdown("#### 💰 當沖損益室 💰")
