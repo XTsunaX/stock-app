@@ -18,39 +18,6 @@ import io
 # ==========================================
 st.set_page_config(page_title="當沖戰略室", page_icon="⚡", layout="wide")
 
-# [修正 1] CSS 修復側邊欄圖標，強制替換為箭頭
-st.markdown("""
-    <style>
-    /* 針對側邊欄收合按鈕進行修正 */
-    button[kind="header"] {
-        background-color: transparent !important;
-        border: none !important;
-    }
-    /* 隱藏原本可能顯示錯誤代碼的元素 */
-    button[kind="header"] svg, 
-    button[kind="header"] i {
-        display: none !important;
-    }
-    /* 插入自定義箭頭 */
-    button[kind="header"]::after {
-        content: "➤"; 
-        font-size: 20px;
-        color: #555;
-        display: block;
-        margin: auto;
-    }
-    
-    .block-container { padding-top: 4.5rem; padding-bottom: 1rem; }
-    div[data-testid="stDataFrame"] { width: 100%; zoom: 1.0; }
-    div[data-testid="stDataFrame"] table, td, th, input, div, span, p {
-        font-family: 'Microsoft JhengHei', sans-serif !important;
-    }
-    [data-testid="stMetricValue"] { font-size: 1.2em; }
-    thead tr th:first-child { display:none }
-    tbody th { display:none }
-    </style>
-""", unsafe_allow_html=True)
-
 # 1. 標題
 st.title("⚡ 當沖戰略室 ⚡")
 
@@ -108,7 +75,6 @@ if 'calc_base_price' not in st.session_state:
 if 'calc_view_price' not in st.session_state:
     st.session_state.calc_view_price = 100.0
 
-# [修正 3] 初始化 cloud_url
 if 'cloud_url' not in st.session_state:
     st.session_state.cloud_url = ""
 
@@ -123,14 +89,26 @@ if 'limit_rows' not in st.session_state:
 # --- 側邊欄設定 ---
 with st.sidebar:
     st.header("⚙️ 設定")
-    current_font_size = st.slider("字體大小 (表格)", 12, 72, value=st.session_state.font_size, key='font_size_slider')
+    
+    current_font_size = st.slider(
+        "字體大小 (表格)", 
+        min_value=12, 
+        max_value=72, 
+        value=st.session_state.font_size,
+        key='font_size_slider'
+    )
     st.session_state.font_size = current_font_size
     
     hide_non_stock = st.checkbox("隱藏非個股 (ETF/權證/債券)", value=True)
     
     st.markdown("---")
     
-    current_limit_rows = st.number_input("顯示筆數 (上傳限制)", min_value=1, value=st.session_state.limit_rows, key='limit_rows_input')
+    current_limit_rows = st.number_input(
+        "顯示筆數 (分析上限)", 
+        min_value=1, 
+        value=st.session_state.limit_rows,
+        key='limit_rows_input'
+    )
     st.session_state.limit_rows = current_limit_rows
     
     if st.button("💾 儲存設定"):
@@ -157,14 +135,40 @@ with st.sidebar:
             st.rerun()
     
     st.caption("功能說明")
-    st.info("🗑️ **如何刪除股票？**\n\n在表格左側勾選「移除」框，該股票將被隱藏。")
+    st.info("🗑️ **如何刪除股票？**\n\n在表格左側勾選「刪除」框，該股票將被隱藏。")
 
-# --- 動態 CSS (Zoom) ---
+# --- 動態 CSS (Zoom & Font Fix) ---
 font_px = f"{st.session_state.font_size}px"
 zoom_level = current_font_size / 14.0
+
+# [修正 1] 嚴格限制 CSS 作用範圍，只針對表格內部，絕不影響側邊欄圖標
 st.markdown(f"""
     <style>
-    div[data-testid="stDataFrame"] {{ width: 100%; zoom: {zoom_level}; }}
+    /* 表格縮放 */
+    div[data-testid="stDataFrame"] {{ 
+        width: 100%; 
+        zoom: {zoom_level}; 
+    }}
+    
+    /* 嚴格指定表格內的元素字體，避免汙染全站導致 Icon 錯誤 */
+    div[data-testid="stDataFrame"] table, 
+    div[data-testid="stDataFrame"] thead, 
+    div[data-testid="stDataFrame"] tbody, 
+    div[data-testid="stDataFrame"] tr, 
+    div[data-testid="stDataFrame"] th, 
+    div[data-testid="stDataFrame"] td, 
+    div[data-testid="stDataFrame"] input,
+    div[data-testid="stDataFrame"] div,
+    div[data-testid="stDataFrame"] span,
+    div[data-testid="stDataFrame"] p {{
+        font-family: 'Microsoft JhengHei', sans-serif !important;
+    }}
+    
+    [data-testid="stMetricValue"] {{ font-size: 1.2em; }}
+    
+    /* 隱藏索引 */
+    thead tr th:first-child {{ display:none }}
+    tbody th {{ display:none }}
     </style>
 """, unsafe_allow_html=True)
 
@@ -291,8 +295,13 @@ def recalculate_row(row, points_map):
         price = float(custom_price)
         limit_up = row.get('當日漲停價')
         limit_down = row.get('當日跌停價')
-        if pd.notna(limit_up) and abs(price - float(limit_up)) < 0.01: status = "🔴 漲停"
-        elif pd.notna(limit_down) and abs(price - float(limit_down)) < 0.01: status = "🟢 跌停"
+        
+        # 比較時需確保 limit_up/down 是 float
+        l_up = float(limit_up) if limit_up and str(limit_up).replace('.','').isdigit() else None
+        l_down = float(limit_down) if limit_down and str(limit_down).replace('.','').isdigit() else None
+        
+        if l_up is not None and abs(price - l_up) < 0.01: status = "🔴 漲停"
+        elif l_down is not None and abs(price - l_down) < 0.01: status = "🟢 跌停"
         else:
             points = points_map.get(code, [])
             if isinstance(points, list):
@@ -479,14 +488,20 @@ with tab1:
                 except: pass
 
         with src_tab2:
-            # [修正 3] 網址綁定 session_state
+            # [修正 3] 網址記憶功能
+            # 使用 on_change 或直接綁定 key 到 session_state
+            if 'cloud_url_val' not in st.session_state:
+                 st.session_state.cloud_url_val = st.session_state.cloud_url
+
+            def update_url():
+                st.session_state.cloud_url = st.session_state.cloud_url_val
+                
             cloud_url_input = st.text_input(
                 "輸入連結 (CSV/Excel/Google Sheet)", 
-                value=st.session_state.cloud_url, 
+                key="cloud_url_val",
+                on_change=update_url,
                 placeholder="https://..."
             )
-            if cloud_url_input != st.session_state.cloud_url:
-                st.session_state.cloud_url = cloud_url_input
             
         search_selection = st.multiselect("🔍 快速查詢 (中文/代號)", options=stock_options, placeholder="輸入 2330 或 台積電...")
 
@@ -524,8 +539,8 @@ with tab1:
                 elif fname.endswith('.xlsx'):
                     df_up = pd.read_excel(uploaded_file, sheet_name=selected_sheet, dtype=str)
 
-            elif st.session_state.cloud_url:
-                url = st.session_state.cloud_url
+            elif st.session_state.cloud_url_val:
+                url = st.session_state.cloud_url_val
                 if "docs.google.com" in url and "/spreadsheets/" in url and "/edit" in url:
                     url = url.split("/edit")[0] + "/export?format=csv"
                 try: df_up = pd.read_csv(url, dtype=str)
@@ -545,26 +560,22 @@ with tab1:
                 for _, row in df_up.iterrows():
                     c_raw = str(row[c_col]).replace('=', '').replace('"', '').strip()
                     if not c_raw or c_raw.lower() == 'nan': continue
-                    
                     is_valid = False
                     if c_raw.isdigit() and len(c_raw) <= 4: is_valid = True
                     elif len(c_raw) > 0 and (c_raw[0].isdigit() or c_raw[0] in ['0','00']): is_valid = True
                     if not is_valid: continue
                     
-                    # [修正] 上傳檔案時就限制筆數，加速分析
-                    if count >= limit_rows: break
+                    if count >= limit_rows: break 
                     
                     n = str(row[n_col]) if n_col else ""
                     if n.lower() == 'nan': n = ""
-                    # source='upload', rank=1
                     targets.append((c_raw, n, 'upload', count))
                     count += 1
 
         if search_selection:
-            for i, item in enumerate(search_selection):
+            for item in search_selection:
                 parts = item.split(' ', 1)
-                # source='search', rank=2
-                targets.append((parts[0], parts[1] if len(parts) > 1 else "", 'search', i))
+                targets.append((parts[0], parts[1] if len(parts) > 1 else "", 'search', 9999))
 
         results = []
         seen = set()
@@ -573,7 +584,6 @@ with tab1:
         total = len(targets)
         
         existing_data = {}
-        # 每次分析重新抓取，不使用舊資料
         st.session_state.stock_data = pd.DataFrame()
 
         fetch_cache = {}
@@ -592,8 +602,6 @@ with tab1:
             
             if data:
                 data['_source'] = source
-                # 設定排序權重：upload=1, search=2
-                data['_source_rank'] = 1 if source == 'upload' else 2
                 data['_order'] = extra
                 existing_data[code] = data
                 seen.add((code, source))
@@ -619,12 +627,15 @@ with tab1:
              mask_warrant = (df_all['代號'].str.len() > 4) & df_all['代號'].str.isdigit()
              df_all = df_all[~(mask_etf | mask_warrant)]
         
-        # [修正 4] 排序：先依來源 (upload優先)，再依原始順序
-        if '_source_rank' in df_all.columns and '_order' in df_all.columns:
-            df_all = df_all.sort_values(by=['_source_rank', '_order'])
+        if '_order' in df_all.columns:
+            df_all = df_all.sort_values(by=['_source', '_order'])
         
-        # 這裡不需再 head(limit)，因為上傳時已限制，搜尋則是全部顯示
-        df_display = df_all.reset_index(drop=True)
+        if '_source' in df_all.columns:
+            df_up = df_all[df_all['_source'] == 'upload'].head(limit)
+            df_se = df_all[df_all['_source'] == 'search']
+            df_display = pd.concat([df_up, df_se]).reset_index(drop=True)
+        else:
+            df_display = df_all.head(limit).reset_index(drop=True)
         
         note_width_px = calculate_note_width(df_display['戰略備註'], current_font_size)
 
@@ -666,7 +677,7 @@ with tab1:
         )
         
         col_btn, _ = st.columns([2, 8])
-        manual_update = col_btn.button("⚡ 立即更新狀態 (或輸入完最後一列自動更新)", use_container_width=True)
+        manual_update = col_btn.button("⚡ 立即更新狀態", use_container_width=True)
         
         if edited_df['移除'].any():
             removed_codes = edited_df[edited_df['移除']]['代號'].unique()
@@ -675,16 +686,14 @@ with tab1:
                 save_data_cache(st.session_state.stock_data, st.session_state.ignored_stocks)
                 st.rerun()
         
-        # [修正 2] 只有按按鈕才觸發重新計算 (避免打一個字跳一次)
-        updated_rows = []
-        for idx, row in edited_df.iterrows():
-            # 預設保留原狀態，只在按按鈕時更新
-            if manual_update:
+        # [修正 2] 只在按按鈕時更新狀態
+        if manual_update:
+            updated_rows = []
+            for idx, row in edited_df.iterrows():
                 new_status = recalculate_row(row, points_map)
                 row['狀態'] = new_status
-            updated_rows.append(row)
-            
-        if updated_rows:
+                updated_rows.append(row)
+                
             df_updated = pd.DataFrame(updated_rows)
             update_map = df_updated.set_index('代號')[['自訂價(可修)', '狀態', '戰略備註']].to_dict('index')
             
@@ -694,8 +703,7 @@ with tab1:
                     st.session_state.stock_data.at[i, '自訂價(可修)'] = update_map[code]['自訂價(可修)']
                     st.session_state.stock_data.at[i, '狀態'] = update_map[code]['狀態']
                     st.session_state.stock_data.at[i, '戰略備註'] = update_map[code]['戰略備註']
-            
-            if manual_update: st.rerun()
+            st.rerun()
 
 with tab2:
     st.markdown("#### 💰 當沖損益室 💰")
