@@ -18,35 +18,6 @@ import io
 # ==========================================
 st.set_page_config(page_title="當沖戰略室", page_icon="⚡", layout="wide")
 
-# [新增] 強制修復側邊欄圖標錯誤的 CSS
-st.markdown("""
-    <style>
-    /* 隱藏原本的 Material Icon (避免顯示 KEYBOARD_DOUBLE_ARROW_RIGHT) */
-    [data-testid="stSidebarCollapsedControl"] i {
-        display: none;
-    }
-    [data-testid="stSidebarCollapsedControl"] svg {
-        display: none;
-    }
-    /* 插入自定義箭頭 */
-    [data-testid="stSidebarCollapsedControl"]::after {
-        content: "➤";
-        font-size: 20px;
-        color: #666;
-        padding-left: 5px;
-    }
-    
-    .block-container { padding-top: 4.5rem; padding-bottom: 1rem; }
-    div[data-testid="stDataFrame"] { width: 100%; zoom: 1.0; } /* 這裡稍後會被動態 zoom 覆蓋 */
-    div[data-testid="stDataFrame"] table, td, th, input, div, span, p {
-        font-family: 'Microsoft JhengHei', sans-serif !important;
-    }
-    [data-testid="stMetricValue"] { font-size: 1.2em; }
-    thead tr th:first-child { display:none }
-    tbody th { display:none }
-    </style>
-""", unsafe_allow_html=True)
-
 # 1. 標題
 st.title("⚡ 當沖戰略室 ⚡")
 
@@ -110,22 +81,34 @@ if 'cloud_url' not in st.session_state:
 saved_config = load_config()
 
 if 'font_size' not in st.session_state:
-    st.session_state.font_size = saved_config.get('font_size', 15) # 預設 15
+    st.session_state.font_size = saved_config.get('font_size', 15)
 
 if 'limit_rows' not in st.session_state:
-    st.session_state.limit_rows = saved_config.get('limit_rows', 5) # 預設 5
+    st.session_state.limit_rows = saved_config.get('limit_rows', 5)
 
 # --- 側邊欄設定 ---
 with st.sidebar:
     st.header("⚙️ 設定")
-    current_font_size = st.slider("字體大小 (表格)", 12, 72, value=st.session_state.font_size, key='font_size_slider')
+    
+    current_font_size = st.slider(
+        "字體大小 (表格)", 
+        min_value=12, 
+        max_value=72, 
+        value=st.session_state.font_size,
+        key='font_size_slider'
+    )
     st.session_state.font_size = current_font_size
     
     hide_non_stock = st.checkbox("隱藏非個股 (ETF/權證/債券)", value=True)
     
     st.markdown("---")
     
-    current_limit_rows = st.number_input("顯示筆數 (分析上限)", min_value=1, value=st.session_state.limit_rows, key='limit_rows_input')
+    current_limit_rows = st.number_input(
+        "顯示筆數 (分析上限)", 
+        min_value=1, 
+        value=st.session_state.limit_rows,
+        key='limit_rows_input'
+    )
     st.session_state.limit_rows = current_limit_rows
     
     if st.button("💾 儲存設定"):
@@ -154,12 +137,39 @@ with st.sidebar:
     st.caption("功能說明")
     st.info("🗑️ **如何刪除股票？**\n\n在表格左側勾選「刪除」框，該股票將被隱藏。")
 
-# --- 動態 CSS (Zoom) ---
+# --- 動態 CSS ---
 font_px = f"{st.session_state.font_size}px"
 zoom_level = current_font_size / 14.0
+
+# [修正] 改回嚴格限定的 CSS 選擇器，只針對 data-testid="stDataFrame" 內部的元素
+# 這樣就不會汙染到側邊欄的按鈕圖標 (KEYBOARD_DOUBLE_ARROW_RIGHT)
 st.markdown(f"""
     <style>
-    div[data-testid="stDataFrame"] {{ width: 100%; zoom: {zoom_level}; }}
+    .block-container {{ padding-top: 4.5rem; padding-bottom: 1rem; }}
+    
+    div[data-testid="stDataFrame"] {{
+        width: 100%;
+        zoom: {zoom_level};
+    }}
+    
+    /* [關鍵修正] 每個選擇器都必須加上前綴，避免全站汙染 */
+    div[data-testid="stDataFrame"] table,
+    div[data-testid="stDataFrame"] td,
+    div[data-testid="stDataFrame"] th,
+    div[data-testid="stDataFrame"] input,
+    div[data-testid="stDataFrame"] div,
+    div[data-testid="stDataFrame"] span,
+    div[data-testid="stDataFrame"] p {{
+        font-family: 'Microsoft JhengHei', sans-serif !important;
+    }}
+    
+    [data-testid="stMetricValue"] {{
+        font-size: 1.2em;
+    }}
+    
+    /* 隱藏索引列 */
+    thead tr th:first-child {{ display:none }}
+    tbody th {{ display:none }}
     </style>
 """, unsafe_allow_html=True)
 
@@ -300,7 +310,7 @@ def recalculate_row(row, points_map):
 def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     code = str(code).strip()
     try:
-        time.sleep(0.1) # 短暫延遲
+        time.sleep(0.1) 
         
         ticker = yf.Ticker(f"{code}.TW")
         hist = ticker.history(period="3mo") 
@@ -353,7 +363,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         points.append({"val": apply_tick_rules(today['High']), "tag": ""})
         points.append({"val": apply_tick_rules(today['Low']), "tag": ""})
         
-        # 昨日
+        # 昨日 (範圍篩選)
         p_close = apply_tick_rules(prev_day['Close'])
         p_high = apply_tick_rules(prev_day['High'])
         p_low = apply_tick_rules(prev_day['Low'])
@@ -524,15 +534,13 @@ with tab1:
         except Exception as e: st.error(f"讀取失敗: {e}")
 
         if not df_up.empty:
-            # 標準化欄位
             df_up.columns = df_up.columns.astype(str).str.strip()
             c_col = next((c for c in df_up.columns if "代號" in str(c)), None)
             n_col = next((c for c in df_up.columns if "名稱" in str(c)), None)
             
             if c_col:
-                # [關鍵] 限制只抓取前 N 筆 (加速)
+                # [修正] 限制只分析前 N 筆 (加速關鍵)
                 limit_rows = st.session_state.limit_rows
-                
                 count = 0
                 for _, row in df_up.iterrows():
                     c_raw = str(row[c_col]).replace('=', '').replace('"', '').strip()
@@ -541,10 +549,9 @@ with tab1:
                     is_valid = False
                     if c_raw.isdigit() and len(c_raw) <= 4: is_valid = True
                     elif len(c_raw) > 0 and (c_raw[0].isdigit() or c_raw[0] in ['0','00']): is_valid = True
-                    
                     if not is_valid: continue
                     
-                    if count >= limit_rows: break # 超過筆數停止
+                    if count >= limit_rows: break # 達到筆數即停止
                     
                     n = str(row[n_col]) if n_col else ""
                     if n.lower() == 'nan': n = ""
@@ -563,8 +570,9 @@ with tab1:
         total = len(targets)
         
         existing_data = {}
-        # 清空舊資料，避免混淆
-        st.session_state.stock_data = pd.DataFrame()
+        if not st.session_state.stock_data.empty:
+            for idx, row in st.session_state.stock_data.iterrows():
+                existing_data[row['代號']] = row.to_dict()
 
         fetch_cache = {}
         for i, (code, name, source, extra) in enumerate(targets):
@@ -573,7 +581,8 @@ with tab1:
             if code in st.session_state.ignored_stocks: continue
             if (code, source) in seen: continue
             
-            # 這裡不隱藏，顯示時再過濾
+            # [修正] 無論是否隱藏非個股，都先抓取，最後顯示再過濾，確保資料完整性
+            # 也不要跳過，避免排序錯誤
             
             time.sleep(0.1)
             
@@ -598,7 +607,7 @@ with tab1:
             save_data_cache(st.session_state.stock_data, st.session_state.ignored_stocks)
 
     if not st.session_state.stock_data.empty:
-        # 這裡不需要再 head(limit)，因為前面已經 filter 過了
+        limit = st.session_state.limit_rows
         df_all = st.session_state.stock_data.copy()
         df_all = df_all.rename(columns={"漲停價": "當日漲停價", "跌停價": "當日跌停價"})
         df_all['代號'] = df_all['代號'].astype(str)
@@ -612,7 +621,7 @@ with tab1:
         if '_order' in df_all.columns:
             df_all = df_all.sort_values(by=['_source', '_order'])
         
-        # 直接顯示所有已抓取的資料
+        # 直接顯示 (已在抓取時限制數量)
         df_display = df_all.reset_index(drop=True)
         
         note_width_px = calculate_note_width(df_display['戰略備註'], current_font_size)
@@ -630,8 +639,8 @@ with tab1:
         cols_to_fmt = ["收盤價", "當日漲停價", "當日跌停價", "+3%", "-3%", "自訂價(可修)"]
         for c in cols_to_fmt:
             if c in df_display.columns: df_display[c] = df_display[c].apply(fmt_price)
-
-        # 強制轉型避免錯誤
+            
+        # [修正] 再次確保轉型
         df_display = df_display.reset_index(drop=True)
         for col in input_cols:
              if col != "移除": df_display[col] = df_display[col].astype(str)
