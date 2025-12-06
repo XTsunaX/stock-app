@@ -8,5 +8,3 @@ openpyxl
 lxml
 FinMind
 twstock
-tqdm
-
