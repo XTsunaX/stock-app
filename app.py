@@ -158,6 +158,7 @@ with st.sidebar:
 font_px = f"{st.session_state.font_size}px"
 zoom_level = current_font_size / 14.0
 
+# [修正] 在 f-string 中 CSS 的大括號必須使用雙括號 {{ }} 來跳脫
 st.markdown(f"""
     <style>
     /* 表格容器縮放 */
@@ -192,10 +193,10 @@ st.markdown(f"""
     .block-container {{ padding-top: 4.5rem; padding-bottom: 1rem; }}
     [data-testid="stMetricValue"] {{ font-size: 1.2em; }}
     
-    /* 調整按鈕間距 */
-    div[data-testid="column"] {
+    /* 調整按鈕間距 (修正了這裡的括號問題) */
+    div[data-testid="column"] {{
         padding: 0;
-    }
+    }}
     </style>
 """, unsafe_allow_html=True)
 
@@ -513,7 +514,7 @@ with tab1:
                 except: pass
 
         with src_tab2:
-            # [修改] 版面優化：使用緊密間距 (gap="small") 並調整比例
+            # 使用 gap="small" 讓按鈕緊靠
             c_url, c_save, c_del = st.columns([12, 1, 1], gap="small")
             
             with c_url:
@@ -694,14 +695,11 @@ with tab1:
              if col != "移除": df_display[col] = df_display[col].astype(str)
 
         # ------------------------------------------------------------------
-        # [核心] 使用 Callback + 智慧判斷
+        # [核心] 使用 Callback + 智慧判斷 (與上個版本相同，這部分邏輯不變)
         # ------------------------------------------------------------------
         def on_editor_change():
             """
             當表格內容變動時觸發此函數。
-            邏輯：
-            1. 中間列的修改 -> 靜默更新 Session State，不重算，不中斷。
-            2. 最後一列的修改 -> 觸發所有列的狀態計算，Streamlit 自動重整畫面。
             """
             state = st.session_state["main_editor"]
             edited_rows = state.get("edited_rows", {})
