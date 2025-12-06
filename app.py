@@ -238,35 +238,70 @@ def search_code_online(query):
         pass
     return None
 
-# [新增] 1. HiStock 爬蟲 (通常較穩)
+# [新增] 1. HiStock 爬蟲 (優先使用，可驗證表格內容)
 def scrape_histock_rank(limit=30):
-    url = "https://histock.tw/stock/rank.aspx?p=tr" # 週轉率排行
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    url = "https://histock.tw/stock/rank.aspx?p=tr"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
     try:
         r = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(r.text, "html.parser")
-        codes = []
-        # HiStock 的股票連結通常是 /stock/2330
-        for a in soup.find_all('a', href=True):
-            href = a['href']
-            if href.startswith("/stock/") and len(href) > 7:
-                # href="/stock/2330"
-                code = href.split("/")[-1]
-                if code.isdigit() and code not in codes:
-                    codes.append(code)
-                if len(codes) >= limit: break
-        return codes
+        # 驗證是否為週轉率頁面
+        if "週轉率" not in r.text:
+            return []
+
+        # 使用 pandas 讀取表格
+        dfs = pd.read_html(r.text)
+        for df in dfs:
+            # HiStock 表格通常包含 '代號' 和 '週轉率'
+            if '代號' in df.columns and '週轉率' in df.columns:
+                # 排除 NaN 並轉為字串
+                codes = df['代號'].dropna().astype(str).tolist()
+                # 過濾非數字代號
+                valid_codes = [c for c in codes if c.isdigit()]
+                return valid_codes[:limit]
+        return []
     except:
         return []
 
-# [修復] 2. Yahoo 爬蟲
+# [新增] 2. PChome 爬蟲 (備援，分上市櫃)
+def scrape_pchome_rank(limit=30):
+    urls = [
+        "https://pchome.megatime.com.tw/rank/tse/turnover_ratio.html", # 上市
+        "https://pchome.megatime.com.tw/rank/otc/turnover_ratio.html"  # 上櫃
+    ]
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    codes = []
+    
+    for url in urls:
+        try:
+            r = requests.get(url, headers=headers, timeout=8)
+            if "週轉率" not in r.text: continue
+            
+            soup = BeautifulSoup(r.text, "html.parser")
+            for a in soup.find_all('a', href=True):
+                href = a['href']
+                # /stock/sid2330.html
+                if "/stock/sid" in href:
+                    code = href.split("sid")[1].split(".")[0]
+                    if code.isdigit() and code not in codes:
+                        codes.append(code)
+                    if len(codes) >= limit: break
+        except: continue
+        if len(codes) >= limit: break
+        
+    return codes[:limit]
+
+# [修改] 3. Yahoo 爬蟲 (最後備援，因為容易擋)
 def scrape_yahoo_rank(limit=30):
     url = "https://tw.stock.yahoo.com/rank/turnover-ratio"
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
     try:
-        r = requests.get(url, headers=headers, timeout=8)
+        r = requests.get(url, headers=headers, timeout=5)
+        if "週轉率" not in r.text: return [] # 驗證頁面內容
+        
         soup = BeautifulSoup(r.text, "html.parser")
         codes = []
         for a in soup.find_all('a', href=True):
@@ -281,34 +316,10 @@ def scrape_yahoo_rank(limit=30):
         return codes
     except: return []
 
-# [新增] 3. PChome 爬蟲
-def scrape_pchome_rank(limit=30):
-    urls = [
-        "https://pchome.megatime.com.tw/rank/tse/turnover_ratio.html",
-        "https://pchome.megatime.com.tw/rank/otc/turnover_ratio.html"
-    ]
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    codes = []
-    for url in urls:
-        try:
-            r = requests.get(url, headers=headers, timeout=5)
-            soup = BeautifulSoup(r.text, "html.parser")
-            for a in soup.find_all('a', href=True):
-                href = a['href']
-                # /stock/sid2330.html
-                if "/stock/sid" in href:
-                    code = href.split("sid")[1].split(".")[0]
-                    if code.isdigit() and code not in codes:
-                        codes.append(code)
-                    if len(codes) >= limit: break
-        except: continue
-        if len(codes) >= limit: break
-    return codes
-
 # [整合] 智慧型排行抓取
 @st.cache_data(ttl=1800)
 def get_smart_rank(limit=30):
-    # 策略 1: HiStock
+    # 策略 1: HiStock (結構最穩，易驗證)
     codes = scrape_histock_rank(limit)
     if codes: return codes, "HiStock"
     
@@ -320,9 +331,7 @@ def get_smart_rank(limit=30):
     codes = scrape_pchome_rank(limit)
     if codes: return codes, "PChome"
     
-    # 策略 4: 備援名單 (避免空白)
-    fallback = ["2330", "2317", "2603", "2609", "3231", "2382", "2454", "3037", "3035", "2356"]
-    return fallback[:limit], "預設清單(連線失敗)"
+    return [], "Fail"
 
 # ==========================================
 # 2. 核心計算邏輯
@@ -449,6 +458,7 @@ def recalculate_row(row):
 def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     code = str(code).strip()
     try:
+        # yfinance 重試機制 (增加到 3 次)
         ticker = yf.Ticker(f"{code}.TW")
         hist = ticker.history(period="3mo") 
         if hist.empty:
@@ -464,6 +474,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         is_today_data = (last_date == now.date())
         is_during_trading = (now.time() < dt_time(13, 45))
         
+        # 盤中不更新：切掉今日資料
         if is_today_data and is_during_trading and len(hist) > 1:
             hist = hist.iloc[:-1]
         
@@ -510,25 +521,16 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         # 昨日收盤價
         points.append({"val": apply_tick_rules(prev_day['Close']), "tag": ""})
         
-        # 昨日開盤價
+        # 昨日開盤價 (僅當等於昨日高/低時才顯示)
         prev_o = apply_tick_rules(prev_day['Open'])
         prev_h = apply_tick_rules(prev_day['High'])
         prev_l = apply_tick_rules(prev_day['Low'])
         if abs(prev_o - prev_h) < 0.01 or abs(prev_o - prev_l) < 0.01:
             points.append({"val": prev_o, "tag": ""})
         
-        # 近5日高低 (不含今日)
-        if is_today_data:
-            hist_prior = hist.iloc[:-1]
-        else:
-            hist_prior = hist
-            
-        if len(hist_prior) >= 5:
-            past_5 = hist_prior.tail(5)
-            points.append({"val": apply_tick_rules(past_5['High'].max()), "tag": ""})
-            points.append({"val": apply_tick_rules(past_5['Low'].min()), "tag": ""})
+        # [修正] 移除 past_5，避免晶彩科 84.6 雜訊
         
-        # 3. 近期高低 (90日)
+        # 3. 近期高低 (90日) - 強制包含今日 High/Low 及現價
         high_90_raw = max(hist['High'].max(), today['High'], current_price)
         low_90_raw = min(hist['Low'].min(), today['Low'], current_price)
         
@@ -558,6 +560,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         for p in points:
             v = float(f"{p['val']:.2f}")
             is_force = p.get('force', False)
+            # 篩選範圍
             if is_force or (limit_down_next <= v <= limit_up_next):
                  display_candidates.append(p) 
             
@@ -642,9 +645,6 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
 
 tab1, tab2 = st.tabs(["⚡ 當沖戰略室 ⚡", "💰 當沖損益室 💰"])
 
-# -------------------------------------------------------
-# Tab 1: 當沖戰略室
-# -------------------------------------------------------
 with tab1:
     col_search, col_file = st.columns([2, 1])
     with col_search:
@@ -661,20 +661,13 @@ with tab1:
                         xl_file = pd.ExcelFile(uploaded_file)
                         sheet_options = xl_file.sheet_names
                         default_idx = 0
-                        if "週轉率" in sheet_options:
-                            default_idx = sheet_options.index("週轉率")
+                        if "週轉率" in sheet_options: default_idx = sheet_options.index("週轉率")
                         selected_sheet = st.selectbox("選擇工作表", sheet_options, index=default_idx)
-                except:
-                    pass
+                except: pass
 
         with src_tab2:
-            cloud_url_input = st.text_input(
-                "輸入連結 (CSV/Excel/Google Sheet)", 
-                value=st.session_state.cloud_url, 
-                placeholder="https://..."
-            )
-            if cloud_url_input != st.session_state.cloud_url:
-                st.session_state.cloud_url = cloud_url_input
+            cloud_url_input = st.text_input("輸入連結 (CSV/Excel/Google Sheet)", value=st.session_state.cloud_url, placeholder="https://...")
+            if cloud_url_input != st.session_state.cloud_url: st.session_state.cloud_url = cloud_url_input
             
         search_selection = st.multiselect("🔍 快速查詢 (中文/代號)", options=stock_options, placeholder="輸入 2330 或 台積電...")
 
@@ -688,7 +681,7 @@ with tab1:
         targets = []
         df_up = pd.DataFrame()
         
-        # 1. 抓取週轉率排行 (自動切換來源)
+        # 1. 抓取排行
         if run_turnover:
             limit_count = st.session_state.limit_rows
             with st.spinner(f"🔥 正在抓取週轉率排行 (前 {limit_count} 筆)..."):
@@ -700,14 +693,13 @@ with tab1:
                     for code in rank_codes:
                         targets.append((code, "", 'rank', {}))
                     
-        # 2. 執行原本的分析 (上傳/搜尋)
+        # 2. 執行分析
         if run_analysis:
             try:
                 if uploaded_file:
                     uploaded_file.seek(0)
                     if uploaded_file.name.endswith('.csv'): df_up = pd.read_csv(uploaded_file, dtype=str)
-                    else: 
-                        df_up = pd.read_excel(uploaded_file, sheet_name=selected_sheet, dtype=str)
+                    else: df_up = pd.read_excel(uploaded_file, sheet_name=selected_sheet, dtype=str)
                 elif st.session_state.cloud_url:
                     url = st.session_state.cloud_url
                     if "docs.google.com" in url and "/spreadsheets/" in url and "/edit" in url:
@@ -728,8 +720,7 @@ with tab1:
                         if len(c_raw) > 10 or any('\u4e00' <= char <= '\u9fff' for char in c_raw): continue
                         if c_raw.isdigit():
                             if len(c_raw) <= 3: c_raw = "00" + c_raw
-                        elif len(c_raw) == 4 and c_raw[0].isdigit() and c_raw[-1].isalpha():
-                            c_raw = "00" + c_raw
+                        elif len(c_raw) == 4 and c_raw[0].isdigit() and c_raw[-1].isalpha(): c_raw = "00" + c_raw
                         n = str(row[n_col]) if n_col else ""
                         if n.lower() == 'nan': n = ""
                         targets.append((c_raw, n, 'upload', {}))
@@ -761,7 +752,8 @@ with tab1:
                 if code.startswith("00"): continue
                 if len(code) > 4 and code.isdigit(): continue
             
-            time.sleep(0.8) # 智慧延遲
+            # 延遲 1 秒
+            time.sleep(1.0)
             
             if code in fetch_cache: data = fetch_cache[code]
             else:
@@ -785,10 +777,7 @@ with tab1:
     if not st.session_state.stock_data.empty:
         limit = st.session_state.limit_rows
         df_all = st.session_state.stock_data.copy()
-        
-        rename_map = {"漲停價": "當日漲停價", "跌停價": "當日跌停價"}
-        df_all = df_all.rename(columns=rename_map)
-        
+        df_all = df_all.rename(columns={"漲停價": "當日漲停價", "跌停價": "當日跌停價"})
         df_all['代號'] = df_all['代號'].astype(str)
         df_all = df_all[~df_all['代號'].isin(st.session_state.ignored_stocks)]
         
@@ -797,11 +786,9 @@ with tab1:
              mask_warrant = (df_all['代號'].str.len() > 4) & df_all['代號'].str.isdigit()
              df_all = df_all[~(mask_etf | mask_warrant)]
         
-        # [修正] 顯示邏輯
         if '_source' in df_all.columns:
             df_up = df_all[df_all['_source'] == 'upload'].head(limit)
             df_se = df_all[df_all['_source'] == 'search']
-            # 確保排行資料依 limit 顯示，且排在最後
             df_rank = df_all[df_all['_source'] == 'rank'].head(limit)
             df_display = pd.concat([df_up, df_se, df_rank]).reset_index(drop=True)
         else:
@@ -812,15 +799,12 @@ with tab1:
         df_display["移除"] = False
         
         input_cols = ["移除", "代號", "名稱", "戰略備註", "自訂價(可修)", "狀態", "當日漲停價", "當日跌停價", "+3%", "-3%", "收盤價", "漲跌幅", "_points"]
-        df_display = df_display.rename(columns={"獲利目標": "+3%", "防守停損": "-3%"})
-
         for col in input_cols:
             if col not in df_display.columns and col != "_points": df_display[col] = None
 
         cols_to_fmt = ["收盤價", "當日漲停價", "當日跌停價", "+3%", "-3%", "自訂價(可修)"]
         for c in cols_to_fmt:
-            if c in df_display.columns:
-                df_display[c] = df_display[c].apply(fmt_price)
+            if c in df_display.columns: df_display[c] = df_display[c].apply(fmt_price)
 
         edited_df = st.data_editor(
             df_display[input_cols],
@@ -839,10 +823,7 @@ with tab1:
                 "戰略備註": st.column_config.TextColumn(width=note_width_px, disabled=False),
                 "_points": None 
             },
-            hide_index=True, 
-            use_container_width=False,
-            num_rows="fixed",
-            key="main_editor"
+            hide_index=True, use_container_width=False, num_rows="fixed", key="main_editor"
         )
         
         col_btn, _ = st.columns([2, 8])
@@ -860,19 +841,8 @@ with tab1:
             last_idx = len(edited_df) - 1
             last_price = edited_df.iloc[last_idx]['自訂價(可修)']
             orig_last_price = df_display.iloc[last_idx]['自訂價(可修)']
-            
-            def is_diff(v1, v2):
-                s1 = str(v1).strip() if pd.notna(v1) else ""
-                s2 = str(v2).strip() if pd.notna(v2) else ""
-                return s1 != s2
-                
-            if is_diff(last_price, orig_last_price):
-                should_update = True
-            pass
-        
-        if manual_update:
-            should_update = True
-            
+            if str(last_price) != str(orig_last_price): should_update = True
+
         updated_rows = []
         for idx, row in edited_df.iterrows():
             new_status = recalculate_row(row)
@@ -893,9 +863,6 @@ with tab1:
             if should_update or manual_update:
                 st.rerun()
 
-# -------------------------------------------------------
-# Tab 2: 當沖損益室
-# -------------------------------------------------------
 with tab2:
     st.markdown("#### 💰 當沖損益室 💰")
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -957,34 +924,22 @@ with tab2:
         roi = 0
         if (base_p * shares) != 0: roi = (profit / (base_p * shares)) * 100
         diff = p - base_p
-        
         diff_str = f"{diff:+.2f}".rstrip('0').rstrip('.') if diff != 0 else "0"
         if diff > 0 and not diff_str.startswith('+'): diff_str = "+" + diff_str
         
         note_type = ""
         if abs(p - limit_up) < 0.001: note_type = "up"
         elif abs(p - limit_down) < 0.001: note_type = "down"
-        
         is_base = (abs(p - base_p) < 0.001)
         
         calc_data.append({
-            "成交價": fmt_price(p),
-            "漲跌": diff_str, 
-            "預估損益": int(profit), 
-            "報酬率%": f"{roi:+.2f}%", 
-            "手續費": int(total_fee), 
-            "交易稅": int(tax), 
-            "_profit": profit, 
-            "_note_type": note_type,
-            "_is_base": is_base
+            "成交價": fmt_price(p), "漲跌": diff_str, "預估損益": int(profit), "報酬率%": f"{roi:+.2f}%",
+            "手續費": int(total_fee), "交易稅": int(tax), "_profit": profit, "_note_type": note_type, "_is_base": is_base
         })
         
     df_calc = pd.DataFrame(calc_data)
-    
     def style_calc_row(row):
-        if row['_is_base']:
-            return ['background-color: #ffffcc; color: black; font-weight: bold; border: 2px solid #ffd700;'] * len(row)
-            
+        if row['_is_base']: return ['background-color: #ffffcc; color: black; font-weight: bold; border: 2px solid #ffd700;'] * len(row)
         nt = row['_note_type']
         if nt == 'up': return ['background-color: #ff4b4b; color: white; font-weight: bold'] * len(row)
         elif nt == 'down': return ['background-color: #00cc00; color: white; font-weight: bold'] * len(row)
@@ -994,14 +949,8 @@ with tab2:
         else: return ['color: gray'] * len(row)
 
     if not df_calc.empty:
-        row_height = 35
-        header_height = 40
-        table_height = (len(df_calc) + 1) * row_height 
-        
+        table_height = (len(df_calc) + 1) * 35 
         st.dataframe(
-            df_calc.style.apply(style_calc_row, axis=1), 
-            use_container_width=False, 
-            hide_index=True, 
-            height=table_height,
+            df_calc.style.apply(style_calc_row, axis=1), use_container_width=False, hide_index=True, height=table_height,
             column_config={"_profit": None, "_note_type": None, "_is_base": None}
         )
