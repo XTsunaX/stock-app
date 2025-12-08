@@ -359,7 +359,7 @@ def recalculate_row(row, points_map):
         return status
     except: return status
 
-# [修正] 資料抓取邏輯 (恢復 yfinance 優先，twstock 為備援)
+# [修正] 資料抓取邏輯 (yfinance 優先，twstock 備援)
 def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     code = str(code).strip()
     hist = pd.DataFrame()
@@ -408,17 +408,13 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         
         if is_today_data and len(hist) >= 2:
             today = hist.iloc[-1]
-            hist_prior = hist.iloc[:-1] # 歷史排除今日
-            prev_day = hist_prior.iloc[-1]
+            prev_day = hist.iloc[-2]
         else:
-            # 資料只更新到昨天 (或者今天還沒開盤/抓不到今天資料)
             today = hist.iloc[-1]
             if len(hist) >= 2:
                 prev_day = hist.iloc[-2]
-                hist_prior = hist.iloc[:-1] 
             else:
                 prev_day = today
-                hist_prior = hist.iloc[:0] 
         
         current_price = today['Close']
         pct_change = ((current_price - prev_day['Close']) / prev_day['Close']) * 100
@@ -460,7 +456,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         if limit_down_show <= p_high <= limit_up_show: points.append({"val": p_high, "tag": ""})
         if limit_down_show <= p_low <= limit_up_show: points.append({"val": p_low, "tag": ""})
         
-        # [恢復舊規則] 區間高低點 (使用包含今日的整段 history)
+        # [恢復舊規則] 區間高低點 (使用整段 history，包含今日)
         high_90_raw = max(hist['High'].max(), today['High'], current_price)
         low_90_raw = min(hist['Low'].min(), today['Low'], current_price)
         high_90 = apply_tick_rules(high_90_raw)
@@ -663,8 +659,7 @@ with tab1:
             n_col = next((c for c in df_up.columns if "名稱" in str(c)), None)
             
             if c_col:
-                limit_rows = st.session_state.limit_rows
-                
+                # 1. 將上傳的檔案資料放入 targets
                 for _, row in df_up.iterrows():
                     c_raw = str(row[c_col]).replace('=', '').replace('"', '').strip()
                     if not c_raw or c_raw.lower() == 'nan': continue
@@ -684,10 +679,15 @@ with tab1:
                     if n.lower() == 'nan': n = ""
                     targets.append((c_raw, n, 'upload'))
 
+        # 2. 將快速查詢的資料 APPEND 到 targets 的後方 (不插隊)
         if search_selection:
             for item in search_selection:
                 parts = item.split(' ', 1)
-                targets.insert(0, (parts[0], parts[1] if len(parts) > 1 else "", 'search'))
+                code_s = parts[0]
+                name_s = parts[1] if len(parts) > 1 else ""
+                # 只有未被忽略的才加入
+                if code_s not in st.session_state.ignored_stocks:
+                    targets.append((code_s, name_s, 'search'))
 
         # 開始分析直到滿額
         success_count = 0
@@ -706,7 +706,7 @@ with tab1:
             if success_count >= limit_count: break # 滿了就停
             if code in seen: continue
             
-            status_text.text(f"正在分析 {i+1}... {code} {name}")
+            status_text.text(f"正在分析 {i+1}/{total_attempts}: {code} {name} ...")
             
             if code in fetch_cache: data = fetch_cache[code]
             else:
@@ -822,8 +822,13 @@ with tab1:
             for i, row in st.session_state.stock_data.iterrows():
                 code = row['代號']
                 if code in update_map:
+                    if update_map[code]['移除']:
+                        st.session_state.ignored_stocks.add(code)
+                        save_data_cache(st.session_state.stock_data, st.session_state.ignored_stocks)
+                    
                     st.session_state.stock_data.at[i, '自訂價(可修)'] = update_map[code]['自訂價(可修)']
                     st.session_state.stock_data.at[i, '戰略備註'] = update_map[code]['戰略備註']
+                    
                     new_status = recalculate_row(st.session_state.stock_data.iloc[i], points_map)
                     st.session_state.stock_data.at[i, '狀態'] = new_status
             st.rerun()
