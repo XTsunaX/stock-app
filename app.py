@@ -157,12 +157,13 @@ with st.sidebar:
     
     st.markdown("---")
     
+    # [修正] 移除 "(僅限檔案上傳)" 文字，改為 "(檔案/雲端)"
     current_limit_rows = st.number_input(
-        "顯示筆數 (僅限檔案上傳)", 
+        "顯示筆數 (檔案/雲端)", 
         min_value=1, 
         value=st.session_state.limit_rows,
         key='limit_rows_input',
-        help="此設定僅限制「檔案/雲端」來源的股票數量。快速查詢的股票會額外顯示。"
+        help="此設定限制「檔案/雲端」來源的股票數量。快速查詢的股票會額外顯示。"
     )
     st.session_state.limit_rows = current_limit_rows
     
@@ -195,7 +196,6 @@ with st.sidebar:
     st.caption("功能說明")
     st.info("🗑️ **如何刪除股票？**\n\n在表格左側勾選「刪除」框，資料將會立即移除並**自動遞補下一檔**。")
     
-    # [新增] 外部連結區塊
     st.markdown("---")
     st.markdown("### 🔗 外部資源")
     st.link_button("📥 Goodinfo 當日週轉率排行", "https://reurl.cc/Or9e37", use_container_width=True, help="點擊前往 Goodinfo 網站下載 CSV")
@@ -690,13 +690,11 @@ with tab1:
                     except: st.error("❌ 無法讀取雲端檔案。")
         except Exception as e: st.error(f"讀取失敗: {e}")
 
-        # [修正順序 1] 先將 Search 的項目加入 targets
         if search_selection:
             for item in search_selection:
                 parts = item.split(' ', 1)
                 targets.append((parts[0], parts[1] if len(parts) > 1 else "", 'search', 9999))
 
-        # [修正順序 2] 再將 Upload 的項目加入 targets
         if not df_up.empty:
             df_up.columns = df_up.columns.astype(str).str.strip()
             c_col = next((c for c in df_up.columns if "代號" in str(c)), None)
@@ -734,29 +732,29 @@ with tab1:
         status_text = st.empty()
         bar = st.progress(0)
         
-        # [修復] 分別計算上傳數量與總數量
         upload_limit = st.session_state.limit_rows
         upload_current = 0
         total_fetched = 0
         
-        # 預估總數(用於進度條)：搜尋的全部 + 上傳的限制數量
         total_for_bar = len(search_selection) if search_selection else 0
         total_for_bar += min(len([t for t in targets if t[2]=='upload']), upload_limit)
         if total_for_bar == 0: total_for_bar = 1
         
         existing_data = {}
-        st.session_state.stock_data = pd.DataFrame()
+        
+        # [新增] 舊資料備份機制
+        old_data_backup = {}
+        if not st.session_state.stock_data.empty:
+             old_data_backup = st.session_state.stock_data.set_index('代號').to_dict('index')
 
+        st.session_state.stock_data = pd.DataFrame() # 清空當前資料
         fetch_cache = {}
         
         for i, (code, name, source, extra) in enumerate(targets):
-            # 判斷邏輯：
-            # 1. 搜尋的 (search) -> 永遠抓取，不佔用上傳額度
-            # 2. 上傳的 (upload) -> 只有在 upload_current < upload_limit 時才抓取
             
             if source == 'upload':
                 if upload_current >= upload_limit:
-                    continue # 額度已滿，跳過
+                    continue 
             
             status_text.text(f"正在分析: {code} {name} ...")
             
@@ -768,6 +766,10 @@ with tab1:
             if code in fetch_cache: data = fetch_cache[code]
             else:
                 data = fetch_stock_data_raw(code, name, extra)
+                # [新增] 如果網路抓不到，嘗試從備份還原
+                if not data and code in old_data_backup:
+                    data = old_data_backup[code]
+                    
                 if data: fetch_cache[code] = data
             
             if data:
@@ -794,7 +796,6 @@ with tab1:
         limit = st.session_state.limit_rows
         df_all = st.session_state.stock_data.copy()
         
-        # 確保有 _source 欄位 (相容性檢查)
         if '_source' not in df_all.columns:
             df_all['_source'] = 'upload'
 
@@ -855,7 +856,7 @@ with tab1:
             key="main_editor"
         )
 
-        # [處理刪除邏輯 + 自動遞補 (修正版: 只遞補 upload)]
+        # [修正] 處理刪除邏輯
         if not edited_df.empty and "移除" in edited_df.columns:
             to_remove = edited_df[edited_df["移除"] == True]
             if not to_remove.empty:
@@ -869,59 +870,56 @@ with tab1:
                     ~st.session_state.stock_data["代號"].isin(remove_codes)
                 ]
                 
-                # 3. 檢查是否需要遞補 (只看 upload 的數量)
-                # 先取得目前剩下的資料
-                df_curr = st.session_state.stock_data
-                if '_source' not in df_curr.columns:
-                    # 如果舊資料沒此欄位，預設為 upload (相容性)
-                    upload_count = len(df_curr)
-                else:
-                    upload_count = len(df_curr[df_curr['_source'] == 'upload'])
+        # [修正] 自動遞補與筆數更新邏輯 (獨立於刪除邏輯之外)
+        # 只要目前上傳類的數量 < 設定上限，就嘗試遞補
+        df_curr = st.session_state.stock_data
+        if not df_curr.empty:
+            if '_source' not in df_curr.columns:
+                 upload_count = len(df_curr)
+            else:
+                 upload_count = len(df_curr[df_curr['_source'] == 'upload'])
+            
+            limit = st.session_state.limit_rows
+            
+            if upload_count < limit and st.session_state.all_candidates:
+                needed = limit - upload_count
+                replenished_count = 0
                 
-                limit = st.session_state.limit_rows
+                existing_codes = set(st.session_state.stock_data['代號'].astype(str))
                 
-                # 只有當「上傳類」的股票少於限制時，才進行遞補
-                if upload_count < limit and st.session_state.all_candidates:
-                    needed = limit - upload_count
-                    replenished_count = 0
-                    
-                    existing_codes = set(st.session_state.stock_data['代號'].astype(str))
-                    
-                    with st.spinner("正在遞補新股票..."):
-                        for cand in st.session_state.all_candidates:
-                             # cand 格式: [code, name, source, extra]
-                             c_code = str(cand[0])
-                             c_name = cand[1]
-                             c_source = cand[2]
-                             c_extra = cand[3]
+                # 這裡使用 Spinner 避免畫面凍結
+                with st.spinner("正在載入更多資料..."):
+                    for cand in st.session_state.all_candidates:
+                         # cand 格式: [code, name, source, extra]
+                         c_code = str(cand[0])
+                         c_name = cand[1]
+                         c_source = cand[2]
+                         c_extra = cand[3]
+                         
+                         if c_source != 'upload': continue
+                         if c_code in st.session_state.ignored_stocks: continue
+                         if c_code in existing_codes: continue
+                         
+                         data = fetch_stock_data_raw(c_code, c_name, c_extra)
+                         if data:
+                             data['_source'] = c_source
+                             data['_order'] = c_extra
+                             data['_source_rank'] = 1
                              
-                             # 只遞補 upload 的，search 的不用補
-                             if c_source != 'upload': continue
+                             st.session_state.stock_data = pd.concat([
+                                 st.session_state.stock_data, 
+                                 pd.DataFrame([data])
+                             ], ignore_index=True)
                              
-                             if c_code in st.session_state.ignored_stocks: continue
-                             if c_code in existing_codes: continue
+                             existing_codes.add(c_code)
+                             replenished_count += 1
                              
-                             # 抓取資料
-                             data = fetch_stock_data_raw(c_code, c_name, c_extra)
-                             if data:
-                                 data['_source'] = c_source
-                                 data['_order'] = c_extra
-                                 data['_source_rank'] = 1  # upload rank
-                                 
-                                 st.session_state.stock_data = pd.concat([
-                                     st.session_state.stock_data, 
-                                     pd.DataFrame([data])
-                                 ], ignore_index=True)
-                                 
-                                 existing_codes.add(c_code)
-                                 replenished_count += 1
-                                 
-                             if replenished_count >= needed: break
+                         if replenished_count >= needed: break
                 
-                # 4. 存檔並重新整理
-                save_data_cache(st.session_state.stock_data, st.session_state.ignored_stocks, st.session_state.all_candidates)
-                st.toast(f"已移除 {len(remove_codes)} 檔股票並完成遞補", icon="🗑️")
-                st.rerun()
+                if replenished_count > 0:
+                    save_data_cache(st.session_state.stock_data, st.session_state.ignored_stocks, st.session_state.all_candidates)
+                    st.toast(f"已更新顯示筆數，增加 {replenished_count} 檔。", icon="🔄")
+                    st.rerun()
 
         # ------------------------------------------------------------------
         # 自動更新最後一列的邏輯
