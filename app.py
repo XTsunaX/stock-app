@@ -12,7 +12,7 @@ from datetime import datetime, time as dt_time
 import pytz
 from decimal import Decimal, ROUND_HALF_UP
 import io
-import twstock  # [新增] 引入 twstock 作為備援資料源
+import twstock  # [必要] 確保 requirements.txt 有加入 twstock
 
 # ==========================================
 # 0. 頁面設定與初始化
@@ -95,6 +95,9 @@ if 'calc_view_price' not in st.session_state:
 
 if 'cloud_url_input' not in st.session_state:
     st.session_state.cloud_url_input = load_saved_url()
+
+if 'auto_update_last_row' not in st.session_state:
+    st.session_state.auto_update_last_row = True  # 預設開啟，但提供開關
 
 saved_config = load_config()
 
@@ -358,11 +361,9 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         if hist.empty:
             try:
                 stock = twstock.Stock(code)
-                # 抓取最近 31 天資料
                 tw_data = stock.fetch_31()
                 
                 if tw_data:
-                    # 轉換為 yfinance 格式的 DataFrame
                     df_tw = pd.DataFrame(tw_data)
                     df_tw['Date'] = pd.to_datetime(df_tw['date'])
                     df_tw = df_tw.set_index('Date')
@@ -375,15 +376,11 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
                         'capacity': 'Volume'
                     }
                     df_tw = df_tw.rename(columns=rename_map)
-                    
-                    # 確保數值型別正確
                     cols = ['Open', 'High', 'Low', 'Close', 'Volume']
                     for c in cols:
                         df_tw[c] = pd.to_numeric(df_tw[c], errors='coerce')
-                        
                     hist = df_tw[cols]
             except Exception as e:
-                # 備援也失敗，就真的略過
                 pass
 
         if hist.empty: return None
@@ -560,14 +557,12 @@ with tab1:
                     "輸入連結 (CSV/Excel/Google Sheet)", 
                     key="cloud_url_input",
                     placeholder="https://...",
-                    # 保留原本文字
                     label_visibility="visible"
                 )
             
             with c_save:
                 # 垂直對齊 hack
                 st.markdown("<div style='margin-top: 29px'></div>", unsafe_allow_html=True)
-                # [修正] 使用 use_container_width=True 讓按鈕填滿這 1/8 的欄位，形成實心區塊
                 if st.button("💾 記憶", help="記憶此連結", use_container_width=True):
                     url_to_save = st.session_state.cloud_url_input
                     if save_saved_url(url_to_save):
@@ -575,7 +570,6 @@ with tab1:
             
             with c_del:
                 st.markdown("<div style='margin-top: 29px'></div>", unsafe_allow_html=True)
-                # [修正] 使用 use_container_width=True
                 if st.button("🗑️ 刪除", help="刪除記憶", use_container_width=True):
                     if save_saved_url(""):
                         st.session_state.cloud_url_input = ""
@@ -738,6 +732,10 @@ with tab1:
         for col in input_cols:
              if col != "移除": df_display[col] = df_display[col].astype(str)
 
+        # [新增] 讓使用者決定是否要「輸入完最後一筆就自動更新」
+        # 這解決了「打到一半就跳掉」的問題，若使用者打字慢，可以關掉此選項
+        auto_update_option = st.checkbox("☑️ 輸入完最後一筆自動更新狀態", value=True)
+
         # ------------------------------------------------------------------
         # [核心] 無 Callback，僅偵測最後一列變更
         # ------------------------------------------------------------------
@@ -764,7 +762,9 @@ with tab1:
         )
         
         need_update = False
-        if not edited_df.empty:
+        
+        # 只有在「勾選自動更新」開啟時，才偵測變更
+        if auto_update_option and not edited_df.empty:
             last_idx = len(edited_df) - 1
             last_row_price = str(edited_df.iloc[last_idx]['自訂價(可修)']).strip()
             
@@ -797,15 +797,54 @@ with tab1:
 
         col_btn, _ = st.columns([1, 10])
         with col_btn:
-             if st.button("⚡ 更新狀態", help="手動重新計算狀態"):
+             # [需求 1] 手動更新需包含「抓取當下股價」
+             if st.button("🔄 更新股價 & 狀態", help="重新抓取最新股價並計算狀態"):
+                 # 1. 保存當前編輯的自訂價
                  update_map = edited_df.set_index('代號')[['自訂價(可修)', '戰略備註']].to_dict('index')
+                 
+                 status_placeholder = st.empty()
+                 status_placeholder.info("正在重新抓取股價...")
+                 
+                 # 2. 重新抓取每一檔的股價 (這會花一點時間)
+                 new_data_list = []
                  for i, row in st.session_state.stock_data.iterrows():
                     code = row['代號']
-                    if code in update_map:
-                        st.session_state.stock_data.at[i, '自訂價(可修)'] = update_map[code]['自訂價(可修)']
-                        st.session_state.stock_data.at[i, '戰略備註'] = update_map[code]['戰略備註']
-                    new_status = recalculate_row(st.session_state.stock_data.iloc[i], points_map)
-                    st.session_state.stock_data.at[i, '狀態'] = new_status
+                    name = row['名稱'].split(' ')[-1] # 簡單取出名稱
+                    source = row.get('_source', 'manual')
+                    order = row.get('_order', 9999)
+                    
+                    # 重新抓取 (包含 twstock 備援)
+                    fresh_data = fetch_stock_data_raw(code, name, order)
+                    
+                    if fresh_data:
+                        # 補回之前的自訂價與來源標記
+                        if code in update_map:
+                            fresh_data['自訂價(可修)'] = update_map[code]['自訂價(可修)']
+                            fresh_data['戰略備註'] = update_map[code]['戰略備註']
+                        else:
+                            fresh_data['自訂價(可修)'] = row['自訂價(可修)']
+                            fresh_data['戰略備註'] = row['戰略備註']
+                            
+                        fresh_data['_source'] = source
+                        fresh_data['_order'] = order
+                        fresh_data['_source_rank'] = row.get('_source_rank', 2)
+                        
+                        # 重新計算狀態
+                        fresh_points_map = {code: fresh_data['_points']}
+                        fresh_data['狀態'] = recalculate_row(pd.Series(fresh_data), fresh_points_map)
+                        
+                        new_data_list.append(fresh_data)
+                    else:
+                        # 抓不到就保留舊的
+                        new_data_list.append(row.to_dict())
+                 
+                 # 3. 更新 Session State
+                 if new_data_list:
+                     st.session_state.stock_data = pd.DataFrame(new_data_list)
+                     save_data_cache(st.session_state.stock_data, st.session_state.ignored_stocks)
+                 
+                 status_placeholder.success("股價已更新！")
+                 time.sleep(0.5)
                  st.rerun()
 
 with tab2:
