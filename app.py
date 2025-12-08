@@ -286,7 +286,7 @@ def search_code_online(query):
 
 def get_live_price(code):
     """
-    抓取當下即時成交價 (雙重備援)。
+    抓取當下即時成交價 (Sanity Check 用)。
     """
     # 1. 嘗試 twstock
     try:
@@ -313,8 +313,7 @@ def get_live_price(code):
 
 def fetch_yahoo_web_backup(code):
     """
-    [新增] 第三備援: 爬取 Yahoo 股市網頁
-    回傳類似 DataFrame 的結構，至少包含今日 Open/High/Low/Close 與昨日 Close
+    [備援] 爬取 Yahoo 股市網頁
     """
     try:
         url = f"https://tw.stock.yahoo.com/quote/{code}"
@@ -322,22 +321,15 @@ def fetch_yahoo_web_backup(code):
         r = requests.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(r.text, 'html.parser')
         
-        # 抓取價格
-        # Yahoo 改版頻繁，需抓取特定 class 或結構
-        # 這裡嘗試抓取主要價格區塊
         price_tag = soup.find('span', class_='Fz(32px)')
         if not price_tag: return None
         price = float(price_tag.text.replace(',', ''))
         
-        # 抓取漲跌 (判斷昨收用)
-        # 通常昨收 = 現價 - 漲跌
+        # 昨收
         change_tag = soup.find('span', class_='Fz(20px)')
         change = 0.0
         if change_tag:
-             # 處理三角形符號與顏色
              change_txt = change_tag.text.strip().replace('▲', '').replace('▼', '').replace('+', '').replace(',', '')
-             # 判斷正負，通常前面有 class 區分顏色，或直接依賴上一層結構
-             # 簡單作法：若有 'C($c-trend-down)' 則是負
              parent = change_tag.parent
              if 'C($c-trend-down)' in str(parent):
                  change = -float(change_txt)
@@ -346,8 +338,6 @@ def fetch_yahoo_web_backup(code):
                  
         prev_close = price - change
         
-        # 抓取開高低 (通常在 price 下方的 list)
-        # 需要遍歷 label 尋找 "開盤", "最高", "最低"
         open_p = price
         high_p = price
         low_p = price
@@ -365,8 +355,6 @@ def fetch_yahoo_web_backup(code):
                 elif "最高" in lbl: high_p = val
                 elif "最低" in lbl: low_p = val
 
-        # 偽造一個 DataFrame
-        # Date 設為今日
         today = datetime.now().date()
         data = {
             'Open': [open_p], 'High': [high_p], 'Low': [low_p], 'Close': [price], 'Volume': [0]
@@ -376,6 +364,39 @@ def fetch_yahoo_web_backup(code):
         return df, prev_close
     except:
         return None, None
+
+def fetch_finmind_backup(code):
+    """
+    [新增] FinMind API 備援 (資料非常準確)
+    """
+    try:
+        # 計算3個月前的日期
+        start_date = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
+        url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id={code}&start_date={start_date}"
+        r = requests.get(url, timeout=5)
+        data_json = r.json()
+        
+        if data_json.get('msg') == 'success' and data_json.get('data'):
+            df = pd.DataFrame(data_json['data'])
+            df['Date'] = pd.to_datetime(df['date'])
+            df = df.set_index('Date')
+            # 轉換欄位名稱以符合程式邏輯
+            rename_map = {
+                'open': 'Open', 'max': 'High', 'min': 'Low', 'close': 'Close', 'Trading_Volume': 'Volume'
+            }
+            df = df.rename(columns=rename_map)
+            cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+            # 確保欄位存在 (FinMind 欄位名有時不同)
+            for c in cols:
+                if c not in df.columns:
+                    # 嘗試其他大小寫
+                    if c.lower() in df.columns: df[c] = df[c.lower()]
+                    else: df[c] = 0.0 # 若真的沒有
+                df[c] = pd.to_numeric(df[c], errors='coerce')
+            
+            return df[cols]
+    except: pass
+    return None
 
 # ==========================================
 # 2. 核心計算邏輯
@@ -481,83 +502,54 @@ def recalculate_row(row, points_map):
         return status
     except: return status
 
-# [修正] 雙重來源抓取 + 比對 + 備援
+# [修正] 嚴格順序制：YF -> TW -> FinMind -> Web
 def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     code = str(code).strip()
     
-    # 容器
-    df_yf = pd.DataFrame()
-    df_tw = pd.DataFrame()
-    
-    # ---------------------------
-    # 1. 抓取 YFinance
-    # ---------------------------
-    try:
-        ticker = yf.Ticker(f"{code}.TW")
-        df_yf = ticker.history(period="3mo")
-        if df_yf.empty:
-            ticker = yf.Ticker(f"{code}.TWO")
-            df_yf = ticker.history(period="3mo")
-    except: pass
-
-    # ---------------------------
-    # 2. 抓取 TWStock
-    # ---------------------------
-    try:
-        stock = twstock.Stock(code)
-        tw_data = stock.fetch_31()
-        if tw_data:
-            df_tmp = pd.DataFrame(tw_data)
-            df_tmp['Date'] = pd.to_datetime(df_tmp['date'])
-            df_tmp = df_tmp.set_index('Date')
-            rename_map = {'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'capacity': 'Volume'}
-            df_tmp = df_tmp.rename(columns=rename_map)
-            cols = ['Open', 'High', 'Low', 'Close', 'Volume']
-            for c in cols: df_tmp[c] = pd.to_numeric(df_tmp[c], errors='coerce')
-            df_tw = df_tmp[cols]
-    except: pass
-
-    # ---------------------------
-    # 3. 比對與選擇 (Cross-Validation)
-    # ---------------------------
     hist = pd.DataFrame()
     source_used = "none"
-    
-    # 邏輯: 誰的日期比較新，就用誰。若日期一樣，比對數值，若差異過大優先信賴 twstock
-    if not df_yf.empty and not df_tw.empty:
-        yf_date = df_yf.index[-1].date()
-        tw_date = df_tw.index[-1].date()
-        
-        if yf_date > tw_date:
-            hist = df_yf
-            source_used = "yf"
-        elif tw_date > yf_date:
-            hist = df_tw
-            source_used = "tw"
-        else:
-            # 日期相同，檢查收盤價
-            yf_close = df_yf.iloc[-1]['Close']
-            tw_close = df_tw.iloc[-1]['Close']
-            
-            # 若差異大於 1%，可能 YF 有錯 (例如未除權息)，信賴 TW
-            if tw_close > 0 and abs(yf_close - tw_close) / tw_close > 0.01:
-                hist = df_tw
-                source_used = "tw(validated)"
-            else:
-                hist = df_yf # 預設 YF，因通常包含盤中即時
-                source_used = "yf(validated)"
-                
-    elif not df_yf.empty:
-        hist = df_yf
-        source_used = "yf_only"
-    elif not df_tw.empty:
-        hist = df_tw
-        source_used = "tw_only"
-    
-    # ---------------------------
-    # 4. 備援: 網頁爬蟲 (當 YF 和 TW 都掛掉)
-    # ---------------------------
     backup_prev_close = None
+
+    # 1. 第一順位: YFinance (最穩定的均線與還原資料)
+    try:
+        ticker = yf.Ticker(f"{code}.TW")
+        hist_yf = ticker.history(period="3mo")
+        if hist_yf.empty:
+            ticker = yf.Ticker(f"{code}.TWO")
+            hist_yf = ticker.history(period="3mo")
+        
+        if not hist_yf.empty:
+            hist = hist_yf
+            source_used = "yfinance"
+    except: pass
+
+    # 2. 第二順位: TWStock (僅當 YF 失敗時使用)
+    if hist.empty:
+        try:
+            stock = twstock.Stock(code)
+            tw_data = stock.fetch_31()
+            if tw_data:
+                df_tw = pd.DataFrame(tw_data)
+                df_tw['Date'] = pd.to_datetime(df_tw['date'])
+                df_tw = df_tw.set_index('Date')
+                rename_map = {'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'capacity': 'Volume'}
+                df_tw = df_tw.rename(columns=rename_map)
+                cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+                for c in cols: df_tw[c] = pd.to_numeric(df_tw[c], errors='coerce')
+                
+                if not df_tw.empty:
+                    hist = df_tw[cols]
+                    source_used = "twstock"
+        except: pass
+
+    # 3. 第三順位: FinMind (開源資料庫，資料準確度高)
+    if hist.empty:
+        df_fm = fetch_finmind_backup(code)
+        if df_fm is not None and not df_fm.empty:
+            hist = df_fm
+            source_used = "finmind"
+
+    # 4. 第四順位: Yahoo 網頁爬蟲 (最後手段)
     if hist.empty:
         df_web, web_prev_close = fetch_yahoo_web_backup(code)
         if df_web is not None:
@@ -578,6 +570,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     is_during_trading = (now.time() < dt_time(13, 30))
     
     live_price = None
+    # 只有當不是爬蟲來源，且歷史資料不是今日時，才去抓即時價來補
     if not is_today_in_hist and source_used != "web_backup":
         live_price = get_live_price(code)
     
@@ -595,11 +588,9 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         if len(hist) >= 1: prev_data = hist.iloc[-1]
         if len(hist) >= 2: pre_prev_data = hist.iloc[-2]
     
-    # 若是網頁備援，手動補上 prev_data 概念
+    # 若是網頁備援，手動補上 prev_data 概念 (Close Only)
     if source_used == "web_backup" and backup_prev_close:
-        # 構造一個假的 prev_data 僅含 Close 用於計算漲跌
         prev_data = pd.Series({'Close': backup_prev_close, 'High': backup_prev_close, 'Low': backup_prev_close}) 
-        # 網頁備援無法取得 T-2
 
     # 2. 決定 Current Price (顯示用)
     if is_today_in_hist:
@@ -610,9 +601,6 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         current_price_real = prev_data['Close'] if prev_data is not None else 0
 
     # 3. 決定 Limit Base Price
-    # 盤中: 基準為 T-1 Close
-    # 盤後: 基準為 T Close
-    
     yesterday_close = prev_data['Close'] if prev_data is not None else current_price_real
     
     if is_during_trading:
@@ -643,7 +631,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     
     points = []
     
-    # 5MA (若資料不足，忽略或僅計算現有)
+    # 5MA (若資料不足，忽略)
     if len(hist) >= 5:
         ma5_raw = hist['Close'].tail(5).mean()
         ma5 = apply_sr_rules(ma5_raw, current_price_real)
