@@ -179,7 +179,7 @@ with st.sidebar:
             st.rerun()
     
     st.caption("功能說明")
-    st.info("🗑️ **如何刪除股票？**\n\n在表格左側勾選「刪除」框，並在最後一列按下 Enter。")
+    st.info("🗑️ **如何刪除股票？**\n\n在表格左側勾選「刪除」框，資料將會立即移除。")
     
     # [新增] 外部連結區塊
     st.markdown("---")
@@ -787,17 +787,17 @@ with tab1:
              if col != "移除": df_display[col] = df_display[col].astype(str)
 
         # ------------------------------------------------------------------
-        # Data Editor Logic
+        # Data Editor Logic (修復版)
         # ------------------------------------------------------------------
         edited_df = st.data_editor(
             df_display[input_cols],
             column_config={
-                "移除": st.column_config.CheckboxColumn("刪除", width=30),
-                "代號": st.column_config.TextColumn(disabled=True, width=50),
+                "移除": st.column_config.CheckboxColumn("刪除", width=40, help="勾選後將立即刪除此股票"),
+                "代號": st.column_config.TextColumn(disabled=True, width="small"),
                 "名稱": st.column_config.TextColumn(disabled=True, width="small"),
                 "收盤價": st.column_config.TextColumn(width="small", disabled=True),
                 "漲跌幅": st.column_config.NumberColumn(format="%.2f%%", disabled=True, width="small"),
-                "自訂價(可修)": st.column_config.TextColumn("自訂價 ✏️", width=60),
+                "自訂價(可修)": st.column_config.TextColumn("自訂價 ✏️", width=80),
                 "當日漲停價": st.column_config.TextColumn(width="small", disabled=True),
                 "當日跌停價": st.column_config.TextColumn(width="small", disabled=True),
                 "+3%": st.column_config.TextColumn(width="small", disabled=True),
@@ -805,12 +805,32 @@ with tab1:
                 "狀態": st.column_config.TextColumn(width=60, disabled=True),
                 "戰略備註": st.column_config.TextColumn(width=note_width_px, disabled=False),
             },
-            hide_index=True, 
-            use_container_width=False, 
-            num_rows="fixed", 
+            hide_index=True,
+            use_container_width=False,
+            num_rows="fixed",
             key="main_editor"
         )
-        
+
+        # [新增] 立即處理刪除邏輯
+        if not edited_df.empty and "移除" in edited_df.columns:
+            to_remove = edited_df[edited_df["移除"] == True]
+            if not to_remove.empty:
+                remove_codes = to_remove["代號"].unique()
+                for c in remove_codes:
+                    st.session_state.ignored_stocks.add(str(c))
+                
+                # 從 stock_data 移除
+                st.session_state.stock_data = st.session_state.stock_data[
+                    ~st.session_state.stock_data["代號"].isin(remove_codes)
+                ]
+                
+                save_data_cache(st.session_state.stock_data, st.session_state.ignored_stocks)
+                st.toast(f"已移除 {len(remove_codes)} 檔股票", icon="🗑️")
+                st.rerun()
+
+        # ------------------------------------------------------------------
+        # 自動更新最後一列的邏輯
+        # ------------------------------------------------------------------
         need_update = False
         
         if st.session_state.auto_update_last_row and not edited_df.empty:
@@ -832,14 +852,10 @@ with tab1:
             if st.session_state.update_delay_sec > 0:
                 time.sleep(st.session_state.update_delay_sec)
                 
-            update_map = edited_df.set_index('代號')[['自訂價(可修)', '戰略備註', '移除']].to_dict('index')
+            update_map = edited_df.set_index('代號')[['自訂價(可修)', '戰略備註']].to_dict('index')
             for i, row in st.session_state.stock_data.iterrows():
                 code = row['代號']
                 if code in update_map:
-                    if update_map[code]['移除']:
-                        st.session_state.ignored_stocks.add(code)
-                        save_data_cache(st.session_state.stock_data, st.session_state.ignored_stocks)
-                    
                     st.session_state.stock_data.at[i, '自訂價(可修)'] = update_map[code]['自訂價(可修)']
                     st.session_state.stock_data.at[i, '戰略備註'] = update_map[code]['戰略備註']
                     
