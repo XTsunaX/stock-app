@@ -109,7 +109,6 @@ if 'font_size' not in st.session_state:
 if 'limit_rows' not in st.session_state:
     st.session_state.limit_rows = saved_config.get('limit_rows', 5)
 
-# 初始化自動更新設定
 if 'auto_update_last_row' not in st.session_state:
     st.session_state.auto_update_last_row = saved_config.get('auto_update', True)
 
@@ -141,7 +140,12 @@ with st.sidebar:
     )
     st.session_state.limit_rows = current_limit_rows
     
-    # 儲存按鈕需包含新設定
+    # 延遲設定 (放在側邊欄比較整潔，常用開關放在主畫面)
+    delay_val = st.number_input("⏳ 自動更新緩衝秒數 (0~5秒)", 
+                    min_value=0.0, max_value=5.0, step=0.1, 
+                    value=st.session_state.update_delay_sec)
+    st.session_state.update_delay_sec = delay_val
+
     if st.button("💾 儲存設定"):
         if save_config(current_font_size, current_limit_rows, 
                       st.session_state.auto_update_last_row, 
@@ -213,6 +217,11 @@ st.markdown(f"""
         padding-left: 0.1rem !important;
         padding-right: 0.1rem !important;
     }}
+    
+    /* 讓 Checkbox 垂直置中 */
+    div[data-testid="stCheckbox"] {{
+        padding-top: 5px;
+    }}
     </style>
 """, unsafe_allow_html=True)
 
@@ -250,28 +259,50 @@ def search_code_online(query):
     if query in name_map: return name_map[query]
     return None
 
-# [新增] 專門抓取即時股價的函數 (使用 twstock)
+# [重要修正] 強化版即時股價抓取 (twstock -> yfinance fallback)
 def get_live_price(code):
     """
-    使用 twstock 抓取當下即時成交價。
-    twstock 直連證交所 MIS，比 yfinance 即時。
+    嘗試抓取最即時的成交價。
+    策略: 
+    1. twstock (MIS即時)
+    2. yfinance fast_info (備援)
     """
+    price = None
+    
+    # 1. 嘗試 twstock (最即時，直連證交所)
     try:
-        # twstock.realtime.get 回傳的是 dict
         realtime_data = twstock.realtime.get(code)
         if realtime_data and realtime_data.get('success'):
             info = realtime_data.get('realtime', {})
-            price = info.get('latest_trade_price')
+            latest = info.get('latest_trade_price')
             
-            # 如果沒有成交價 (例如盤前)，嘗試抓最佳買價
-            if price == '-' or not price:
+            # 處理無成交價的情況 (如漲跌停鎖死或剛開盤)
+            if latest == '-' or not latest:
                 bids = info.get('best_bid_price', [])
-                if bids: price = bids[0]
-                
-            if price and price != '-':
-                return float(price)
+                if bids and bids[0] != '-': latest = bids[0]
+                else:
+                    asks = info.get('best_ask_price', [])
+                    if asks and asks[0] != '-': latest = asks[0]
+            
+            if latest and latest != '-':
+                price = float(latest)
     except: pass
-    return None
+    
+    # 2. 如果 twstock 失敗，使用 yfinance 備援
+    if price is None:
+        try:
+            ticker = yf.Ticker(f"{code}.TW")
+            # fast_info 通常比 history 更快更新
+            last_p = ticker.fast_info.get('last_price')
+            if pd.isna(last_p) or last_p is None:
+                ticker = yf.Ticker(f"{code}.TWO") # 試試櫃買
+                last_p = ticker.fast_info.get('last_price')
+            
+            if last_p and not pd.isna(last_p):
+                price = float(last_p)
+        except: pass
+        
+    return price
 
 # ==========================================
 # 2. 核心計算邏輯
@@ -752,21 +783,6 @@ with tab1:
         for col in input_cols:
              if col != "移除": df_display[col] = df_display[col].astype(str)
 
-        # [UI] 放置自動更新開關與延遲設定於主畫面
-        col_opt1, col_opt2, _ = st.columns([2, 2, 6])
-        with col_opt1:
-            auto_update = st.checkbox("☑️ 啟用最後一列自動更新", 
-                value=st.session_state.auto_update_last_row,
-                key="toggle_auto_update")
-            st.session_state.auto_update_last_row = auto_update
-        with col_opt2:
-            if auto_update:
-                delay_val = st.number_input("⏳ 緩衝秒數 (Enter後等待)", 
-                    min_value=0.0, max_value=5.0, step=0.1, 
-                    value=st.session_state.update_delay_sec,
-                    label_visibility="collapsed")
-                st.session_state.update_delay_sec = delay_val
-
         # ------------------------------------------------------------------
         # Data Editor Logic
         # ------------------------------------------------------------------
@@ -811,7 +827,7 @@ with tab1:
                         need_update = True
         
         if need_update:
-            # [新增] 延遲緩衝 (給使用者一點時間後悔或確認)
+            # 延遲緩衝
             if st.session_state.update_delay_sec > 0:
                 time.sleep(st.session_state.update_delay_sec)
                 
@@ -830,35 +846,53 @@ with tab1:
                     st.session_state.stock_data.at[i, '狀態'] = new_status
             st.rerun()
 
-        col_check, col_btn, _ = st.columns([2, 2, 8])
-        with col_check:
-            st.markdown("<div style='margin-top: 5px'></div>", unsafe_allow_html=True)
-            sync_price = st.checkbox("同步填入當下股價", help="勾選後，按下更新按鈕會自動抓取最新成交價填入自訂價")
-            
-        with col_btn:
-             if st.button("⚡ 執行更新", help="手動重新計算狀態"):
-                 update_map = edited_df.set_index('代號')[['自訂價(可修)', '戰略備註']].to_dict('index')
-                 
-                 for i, row in st.session_state.stock_data.iterrows():
-                    code = row['代號']
-                    
-                    # [新增] 同步即時股價邏輯
-                    if sync_price:
-                        # 這裡使用新函數抓取 real-time
-                        live_p = get_live_price(code)
-                        if live_p is not None:
-                            st.session_state.stock_data.at[i, '自訂價(可修)'] = live_p
-                            if code in update_map: update_map[code]['自訂價(可修)'] = live_p
-                    
-                    elif code in update_map:
-                        st.session_state.stock_data.at[i, '自訂價(可修)'] = update_map[code]['自訂價(可修)']
-                        st.session_state.stock_data.at[i, '戰略備註'] = update_map[code]['戰略備註']
-                    
-                    # 只更新狀態，不動其他欄位
-                    new_status = recalculate_row(st.session_state.stock_data.iloc[i], points_map)
-                    st.session_state.stock_data.at[i, '狀態'] = new_status
-                 
-                 st.rerun()
+        # [修正] 操作區塊配置 (按鈕 -> 自動更新 -> 同步股價)
+        c_btn, c_auto, c_sync = st.columns([1, 1, 1])
+        
+        # 1. 執行更新按鈕
+        with c_btn:
+             do_update = st.button("⚡ 執行更新", help="手動重新計算狀態", use_container_width=True, type="primary")
+        
+        # 2. 啟用最後一列自動更新
+        with c_auto:
+            st.markdown("<div style='padding-top: 5px;'></div>", unsafe_allow_html=True)
+            auto_update_toggle = st.checkbox("啟用最後一列自動更新", 
+                value=st.session_state.auto_update_last_row)
+            if auto_update_toggle != st.session_state.auto_update_last_row:
+                st.session_state.auto_update_last_row = auto_update_toggle
+                st.rerun()
+                
+        # 3. 同步當下股價
+        with c_sync:
+            st.markdown("<div style='padding-top: 5px;'></div>", unsafe_allow_html=True)
+            sync_price_toggle = st.checkbox("同步當下股價至自訂價", 
+                value=False, # 預設不勾選，防止誤觸
+                help="勾選後，按下「執行更新」按鈕會自動抓取最新成交價填入自訂價")
+
+        # 處理手動更新邏輯
+        if do_update:
+             update_map = edited_df.set_index('代號')[['自訂價(可修)', '戰略備註']].to_dict('index')
+             
+             for i, row in st.session_state.stock_data.iterrows():
+                code = row['代號']
+                
+                # 若勾選同步，嘗試抓取 live price
+                if sync_price_toggle:
+                    live_p = get_live_price(code)
+                    if live_p is not None:
+                        st.session_state.stock_data.at[i, '自訂價(可修)'] = live_p
+                        if code in update_map: update_map[code]['自訂價(可修)'] = live_p
+                
+                # 否則使用表格中的值
+                elif code in update_map:
+                    st.session_state.stock_data.at[i, '自訂價(可修)'] = update_map[code]['自訂價(可修)']
+                    st.session_state.stock_data.at[i, '戰略備註'] = update_map[code]['戰略備註']
+                
+                # 僅重新計算狀態，不動其他欄位
+                new_status = recalculate_row(st.session_state.stock_data.iloc[i], points_map)
+                st.session_state.stock_data.at[i, '狀態'] = new_status
+             
+             st.rerun()
 
 with tab2:
     st.markdown("#### 💰 當沖損益室 💰")
