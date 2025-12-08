@@ -8,7 +8,7 @@ import time
 import os
 import itertools
 import json
-from datetime import datetime, timedelta, time as dt_time
+from datetime import datetime, time as dt_time
 import pytz
 from decimal import Decimal, ROUND_HALF_UP
 import io
@@ -179,7 +179,7 @@ with st.sidebar:
             st.rerun()
     
     st.caption("功能說明")
-    st.info("🗑️ **如何刪除股票？**\n\n在表格左側勾選「刪除」框即可，無需按Enter。")
+    st.info("🗑️ **如何刪除股票？**\n\n在表格左側勾選「刪除」框即可，會立即移除。")
     
     st.markdown("---")
     st.markdown("### 🔗 外部資源")
@@ -359,7 +359,7 @@ def recalculate_row(row, points_map):
         return status
     except: return status
 
-# [修正] 資料抓取邏輯 (增強備援)
+# [修正] 資料抓取邏輯 (增強備援與驗證)
 def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     code = str(code).strip()
     hist = pd.DataFrame()
@@ -370,19 +370,21 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         # 1. 優先嘗試 yfinance
         ticker = yf.Ticker(f"{code}.TW")
         hist = ticker.history(period="3mo")
-        # 檢查 yfinance 資料有效性 (有時會回傳空列或全是 NaN)
-        if hist.empty or hist['Close'].isna().all() or len(hist) < 2:
+        
+        # 2. 若 yfinance 無效 (空值/NaN/長度不足)，切換備援
+        is_invalid = hist.empty or len(hist) < 5 or hist['Close'].isna().all()
+        
+        if is_invalid:
             ticker = yf.Ticker(f"{code}.TWO")
             hist = ticker.history(period="3mo")
+            is_invalid = hist.empty or len(hist) < 5 or hist['Close'].isna().all()
         
-        # 2. 如果 yfinance 無效 (空或壞資料)，強制切換 twstock
-        is_bad_data = hist.empty or hist['Close'].isna().all() or len(hist) < 2
-        
-        if is_bad_data:
+        # 3. yfinance 徹底失敗，強制使用 twstock
+        if is_invalid:
             try:
                 stock = twstock.Stock(code)
                 tw_data = stock.fetch_31()
-                if tw_data and len(tw_data) > 1:
+                if tw_data and len(tw_data) > 5:
                     df_tw = pd.DataFrame(tw_data)
                     df_tw['Date'] = pd.to_datetime(df_tw['date'])
                     df_tw = df_tw.set_index('Date')
@@ -399,41 +401,28 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         tz = pytz.timezone('Asia/Taipei')
         now = datetime.now(tz)
         
-        # 取得最後一筆的日期
         last_dt = hist.index[-1]
         last_date = last_dt.date()
         is_today_data = (last_date == now.date())
-        
-        # 盤中時間判定 (09:00 ~ 13:45)
-        # 若資料是今天的，且現在時間 < 13:45，視為盤中
         is_during_trading = (is_today_data and now.time() < dt_time(13, 45))
         
         if is_today_data and len(hist) >= 2:
             today = hist.iloc[-1]
-            hist_prior = hist.iloc[:-1] # 排除今日的歷史
+            hist_prior = hist.iloc[:-1] # 歷史排除今日
             prev_day = hist_prior.iloc[-1]
         else:
-            # 資料只更新到昨天 (或者今天還沒開盤/抓不到今天資料)
             today = hist.iloc[-1]
             if len(hist) >= 2:
                 prev_day = hist.iloc[-2]
-                hist_prior = hist.iloc[:-1]
+                hist_prior = hist.iloc[:-1] # 歷史排除今日(即昨天以前)
             else:
                 prev_day = today
-                hist_prior = hist.iloc[:0] # 空
+                hist_prior = hist.iloc[:0] 
         
         current_price = today['Close']
         pct_change = ((current_price - prev_day['Close']) / prev_day['Close']) * 100
         
-        # 3% 規則
-        target_raw = current_price * 1.03
-        stop_raw = current_price * 0.97
-        target_price = apply_sr_rules(target_raw, current_price)
-        stop_price = apply_sr_rules(stop_raw, current_price)
-        
-        # [關鍵修正] 盤中/盤後基準價邏輯
-        # 盤中: 漲跌停限制是基於「昨收」
-        # 盤後: 預測明天的漲跌停，基準是「今收」
+        # 盤中/盤後基準價邏輯
         if is_during_trading:
             base_price_for_limit = prev_day['Close']
         else:
@@ -441,6 +430,12 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             
         limit_up_show, limit_down_show = calculate_limits(base_price_for_limit)
         limit_up_today, limit_down_today = calculate_limits(prev_day['Close'])
+
+        # 基礎策略規則
+        target_raw = current_price * 1.03
+        stop_raw = current_price * 0.97
+        target_price = apply_sr_rules(target_raw, current_price)
+        stop_price = apply_sr_rules(stop_raw, current_price)
 
         points = []
         
@@ -464,11 +459,10 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         if limit_down_show <= p_high <= limit_up_show: points.append({"val": p_high, "tag": ""})
         if limit_down_show <= p_low <= limit_up_show: points.append({"val": p_low, "tag": ""})
         
-        # [修正] 近期高低點邏輯 (排除今日)
-        # 1. 找出排除今日後的歷史高低點
-        # 2. 判斷該高低點是否在「明日漲跌停範圍內」(可到達)
-        # 3. 若可到達 -> 顯示高/低
-        # 4. 若不可到達或無歷史 -> 顯示 +3% / -3%
+        # [新規則] 近期高低點邏輯
+        # 1. 以當天收盤日期往回推 (hist_prior已經排除了today)
+        # 2. 取歷史高點和低點
+        # 3. 判斷是否在明日(或當日)漲跌停範圍內 (可到達)
         
         used_high_rule = False
         used_low_rule = False
@@ -486,7 +480,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
                 points.append({"val": apply_tick_rules(past_low_val), "tag": "低"})
                 used_low_rule = True
         
-        # 備援: 若無有效前高/前低，使用 +/- 3%
+        # 若無法到達或無歷史，套用 +3% / -3%
         if not used_high_rule:
             if target_price > 0: points.append({"val": target_price, "tag": ""})
         if not used_low_rule:
@@ -503,7 +497,6 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         for p in points:
             v = float(f"{p['val']:.2f}")
             is_force = p.get('force', False)
-            # 過濾掉超出顯示範圍(明日漲跌停)的點，除非強制顯示
             if is_force or (limit_down_show <= v <= limit_up_show):
                  display_candidates.append(p) 
             
@@ -683,8 +676,8 @@ with tab1:
             n_col = next((c for c in df_up.columns if "名稱" in str(c)), None)
             
             if c_col:
+                # [關鍵修正] 遞補邏輯：不使用 break，而是收集所有潛在名單
                 limit_rows = st.session_state.limit_rows
-                count = 0
                 
                 for _, row in df_up.iterrows():
                     c_raw = str(row[c_col]).replace('=', '').replace('"', '').strip()
@@ -701,49 +694,50 @@ with tab1:
                         is_warrant = (len(c_raw) > 4) and c_raw.isdigit()
                         if is_etf or is_warrant: continue
                     
-                    if count >= limit_rows: break 
-                    
                     n = str(row[n_col]) if n_col else ""
                     if n.lower() == 'nan': n = ""
-                    targets.append((c_raw, n, 'upload', count))
-                    count += 1
+                    targets.append((c_raw, n, 'upload'))
 
         if search_selection:
             for item in search_selection:
                 parts = item.split(' ', 1)
-                targets.append((parts[0], parts[1] if len(parts) > 1 else "", 'search', 9999))
+                targets.insert(0, (parts[0], parts[1] if len(parts) > 1 else "", 'search'))
 
+        # 開始抓取 (直到滿 limit_rows 筆成功為止)
         results = []
         seen = set()
         status_text = st.empty()
         bar = st.progress(0)
-        total = len(targets)
+        
+        limit_count = st.session_state.limit_rows
+        success_count = 0
+        total_targets = len(targets)
         
         existing_data = {}
         st.session_state.stock_data = pd.DataFrame()
 
         fetch_cache = {}
-        for i, (code, name, source, extra) in enumerate(targets):
-            status_text.text(f"正在分析 {i+1}/{total}: {code} {name} ...")
+        
+        for i, (code, name, source) in enumerate(targets):
+            if success_count >= limit_count: break # 抓滿即停
+            if code in seen: continue
             
-            if code in st.session_state.ignored_stocks: continue
-            if (code, source) in seen: continue
-            
-            time.sleep(0.1)
+            status_text.text(f"正在分析 {i+1}... {code} {name}")
             
             if code in fetch_cache: data = fetch_cache[code]
             else:
-                data = fetch_stock_data_raw(code, name, extra)
+                data = fetch_stock_data_raw(code, name)
                 if data: fetch_cache[code] = data
             
             if data:
                 data['_source'] = source
-                data['_order'] = extra
-                data['_source_rank'] = 1 if source == 'upload' else 2
                 existing_data[code] = data
-                seen.add((code, source))
-                
-            if total > 0: bar.progress((i+1)/total)
+                seen.add(code)
+                success_count += 1
+            
+            # 簡單進度條
+            if limit_count > 0: 
+                bar.progress(min(success_count / limit_count, 1.0))
         
         bar.empty()
         status_text.empty()
@@ -764,9 +758,7 @@ with tab1:
              mask_warrant = (df_all['代號'].str.len() > 4) & df_all['代號'].str.isdigit()
              df_all = df_all[~(mask_etf | mask_warrant)]
         
-        if '_source_rank' in df_all.columns:
-            df_all = df_all.sort_values(by=['_source_rank', '_order'])
-        
+        # 顯示邏輯
         df_display = df_all.reset_index(drop=True)
         note_width_px = calculate_note_width(df_display['戰略備註'], current_font_size)
         df_display["移除"] = False
@@ -823,7 +815,7 @@ with tab1:
                 save_data_cache(st.session_state.stock_data, st.session_state.ignored_stocks)
                 st.rerun()
 
-        # 自動更新判斷 (最後一列輸入)
+        # 自動更新判斷
         if st.session_state.auto_update_last_row and not edited_df.empty:
             last_idx = len(edited_df) - 1
             last_row_price = str(edited_df.iloc[last_idx]['自訂價(可修)']).strip()
@@ -860,18 +852,15 @@ with tab1:
 
         st.markdown("---")
         
-        # 1. 執行更新按鈕
         col_btn, _ = st.columns([2, 8])
         with col_btn:
             btn_update = st.button("⚡ 執行更新", use_container_width=False, type="primary")
         
-        # 2. 自動更新開關
         auto_update = st.checkbox("☑️ 啟用最後一列自動更新", 
             value=st.session_state.auto_update_last_row,
             key="toggle_auto_update")
         st.session_state.auto_update_last_row = auto_update
         
-        # 3. 緩衝秒數
         if auto_update:
             col_delay, _ = st.columns([2, 8])
             with col_delay:
@@ -880,7 +869,6 @@ with tab1:
                     value=st.session_state.update_delay_sec)
                 st.session_state.update_delay_sec = delay_val
 
-        # 按鈕邏輯
         if btn_update:
              update_map = edited_df.set_index('代號')[['自訂價(可修)', '戰略備註']].to_dict('index')
              for i, row in st.session_state.stock_data.iterrows():
