@@ -285,6 +285,10 @@ def search_code_online(query):
     return None
 
 def get_live_price(code):
+    """
+    抓取當下即時成交價 (雙重備援)。
+    """
+    # 1. 嘗試 twstock
     try:
         realtime_data = twstock.realtime.get(code)
         if realtime_data and realtime_data.get('success'):
@@ -295,6 +299,8 @@ def get_live_price(code):
             if bids and bids[0] and bids[0] != '-':
                  return float(bids[0])
     except: pass
+
+    # 2. 備援 yfinance fast_info
     try:
         ticker = yf.Ticker(f"{code}.TW")
         price = ticker.fast_info.get('last_price')
@@ -304,6 +310,72 @@ def get_live_price(code):
         if price and not math.isnan(price): return float(price)
     except: pass
     return None
+
+def fetch_yahoo_web_backup(code):
+    """
+    [新增] 第三備援: 爬取 Yahoo 股市網頁
+    回傳類似 DataFrame 的結構，至少包含今日 Open/High/Low/Close 與昨日 Close
+    """
+    try:
+        url = f"https://tw.stock.yahoo.com/quote/{code}"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        r = requests.get(url, headers=headers, timeout=5)
+        soup = BeautifulSoup(r.text, 'html.parser')
+        
+        # 抓取價格
+        # Yahoo 改版頻繁，需抓取特定 class 或結構
+        # 這裡嘗試抓取主要價格區塊
+        price_tag = soup.find('span', class_='Fz(32px)')
+        if not price_tag: return None
+        price = float(price_tag.text.replace(',', ''))
+        
+        # 抓取漲跌 (判斷昨收用)
+        # 通常昨收 = 現價 - 漲跌
+        change_tag = soup.find('span', class_='Fz(20px)')
+        change = 0.0
+        if change_tag:
+             # 處理三角形符號與顏色
+             change_txt = change_tag.text.strip().replace('▲', '').replace('▼', '').replace('+', '').replace(',', '')
+             # 判斷正負，通常前面有 class 區分顏色，或直接依賴上一層結構
+             # 簡單作法：若有 'C($c-trend-down)' 則是負
+             parent = change_tag.parent
+             if 'C($c-trend-down)' in str(parent):
+                 change = -float(change_txt)
+             else:
+                 change = float(change_txt)
+                 
+        prev_close = price - change
+        
+        # 抓取開高低 (通常在 price 下方的 list)
+        # 需要遍歷 label 尋找 "開盤", "最高", "最低"
+        open_p = price
+        high_p = price
+        low_p = price
+        
+        details = soup.find_all('li', class_='price-detail-item')
+        for item in details:
+            label = item.find('span', class_='C(#6e7780)')
+            val_tag = item.find('span', class_='Fw(600)')
+            if label and val_tag:
+                lbl = label.text.strip()
+                val_txt = val_tag.text.strip().replace(',', '')
+                if val_txt == '-': continue
+                val = float(val_txt)
+                if "開盤" in lbl: open_p = val
+                elif "最高" in lbl: high_p = val
+                elif "最低" in lbl: low_p = val
+
+        # 偽造一個 DataFrame
+        # Date 設為今日
+        today = datetime.now().date()
+        data = {
+            'Open': [open_p], 'High': [high_p], 'Low': [low_p], 'Close': [price], 'Volume': [0]
+        }
+        df = pd.DataFrame(data, index=[pd.to_datetime(today)])
+        
+        return df, prev_close
+    except:
+        return None, None
 
 # ==========================================
 # 2. 核心計算邏輯
@@ -409,243 +481,296 @@ def recalculate_row(row, points_map):
         return status
     except: return status
 
-# [修正] 核心資料抓取與計算邏輯
+# [修正] 雙重來源抓取 + 比對 + 備援
 def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     code = str(code).strip()
-    hist = pd.DataFrame()
     
+    # 容器
+    df_yf = pd.DataFrame()
+    df_tw = pd.DataFrame()
+    
+    # ---------------------------
+    # 1. 抓取 YFinance
+    # ---------------------------
     try:
-        time.sleep(0.1)
-        
-        # 1. 抓取資料
         ticker = yf.Ticker(f"{code}.TW")
-        hist = ticker.history(period="3mo") 
-        if hist.empty:
+        df_yf = ticker.history(period="3mo")
+        if df_yf.empty:
             ticker = yf.Ticker(f"{code}.TWO")
-            hist = ticker.history(period="3mo")
-        
-        if hist.empty:
-            try:
-                stock = twstock.Stock(code)
-                tw_data = stock.fetch_31()
-                if tw_data:
-                    df_tw = pd.DataFrame(tw_data)
-                    df_tw['Date'] = pd.to_datetime(df_tw['date'])
-                    df_tw = df_tw.set_index('Date')
-                    rename_map = {'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'capacity': 'Volume'}
-                    df_tw = df_tw.rename(columns=rename_map)
-                    cols = ['Open', 'High', 'Low', 'Close', 'Volume']
-                    for c in cols: df_tw[c] = pd.to_numeric(df_tw[c], errors='coerce')
-                    hist = df_tw[cols]
-            except: pass
+            df_yf = ticker.history(period="3mo")
+    except: pass
 
-        if hist.empty: return None
+    # ---------------------------
+    # 2. 抓取 TWStock
+    # ---------------------------
+    try:
+        stock = twstock.Stock(code)
+        tw_data = stock.fetch_31()
+        if tw_data:
+            df_tmp = pd.DataFrame(tw_data)
+            df_tmp['Date'] = pd.to_datetime(df_tmp['date'])
+            df_tmp = df_tmp.set_index('Date')
+            rename_map = {'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'capacity': 'Volume'}
+            df_tmp = df_tmp.rename(columns=rename_map)
+            cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+            for c in cols: df_tmp[c] = pd.to_numeric(df_tmp[c], errors='coerce')
+            df_tw = df_tmp[cols]
+    except: pass
 
-        # --- 時間與資料定位 ---
-        tz = pytz.timezone('Asia/Taipei')
-        now = datetime.now(tz)
+    # ---------------------------
+    # 3. 比對與選擇 (Cross-Validation)
+    # ---------------------------
+    hist = pd.DataFrame()
+    source_used = "none"
+    
+    # 邏輯: 誰的日期比較新，就用誰。若日期一樣，比對數值，若差異過大優先信賴 twstock
+    if not df_yf.empty and not df_tw.empty:
+        yf_date = df_yf.index[-1].date()
+        tw_date = df_tw.index[-1].date()
         
-        # 判定 hist 最後一筆是否為今日
-        last_date = hist.index[-1].date()
-        is_today_in_hist = (last_date == now.date())
-        
-        # 盤中界線：13:30 (台股收盤)
-        is_during_trading = (now.time() < dt_time(13, 30))
-        
-        live_price = None
-        if not is_today_in_hist:
-            live_price = get_live_price(code)
-        
-        # 1. 定位 Today, Prev(T-1), PrePrev(T-2)
-        today_data = None
-        prev_data = None
-        pre_prev_data = None
-        
-        if is_today_in_hist:
-            today_data = hist.iloc[-1]
-            if len(hist) >= 2: prev_data = hist.iloc[-2]
-            if len(hist) >= 3: pre_prev_data = hist.iloc[-3]
+        if yf_date > tw_date:
+            hist = df_yf
+            source_used = "yf"
+        elif tw_date > yf_date:
+            hist = df_tw
+            source_used = "tw"
         else:
-            # hist 只到昨日
-            # 今日用 live_price 模擬，或標記為 None
-            if len(hist) >= 1: prev_data = hist.iloc[-1]
-            if len(hist) >= 2: pre_prev_data = hist.iloc[-2]
-        
-        # 2. 決定 Current Price (顯示用)
-        if is_today_in_hist:
-            current_price_real = today_data['Close']
-        elif live_price:
-            current_price_real = live_price
-        else:
-            # 完全無今日資訊，只好顯示昨日收盤
-            current_price_real = prev_data['Close'] if prev_data is not None else 0
-
-        # 3. 決定 Limit Base Price (計算顯示範圍用)
-        # 盤中: 基準為 T-1 Close
-        # 盤後: 基準為 T Close
-        
-        # 取得 T-1 Close
-        yesterday_close = prev_data['Close'] if prev_data is not None else current_price_real
-        
-        if is_during_trading:
-            base_price_for_limit = yesterday_close
-        else:
-            # 盤後，基準為今日收盤
-            if is_today_in_hist:
-                base_price_for_limit = today_data['Close']
-            elif live_price:
-                base_price_for_limit = live_price
+            # 日期相同，檢查收盤價
+            yf_close = df_yf.iloc[-1]['Close']
+            tw_close = df_tw.iloc[-1]['Close']
+            
+            # 若差異大於 1%，可能 YF 有錯 (例如未除權息)，信賴 TW
+            if tw_close > 0 and abs(yf_close - tw_close) / tw_close > 0.01:
+                hist = df_tw
+                source_used = "tw(validated)"
             else:
-                base_price_for_limit = yesterday_close
+                hist = df_yf # 預設 YF，因通常包含盤中即時
+                source_used = "yf(validated)"
+                
+    elif not df_yf.empty:
+        hist = df_yf
+        source_used = "yf_only"
+    elif not df_tw.empty:
+        hist = df_tw
+        source_used = "tw_only"
+    
+    # ---------------------------
+    # 4. 備援: 網頁爬蟲 (當 YF 和 TW 都掛掉)
+    # ---------------------------
+    backup_prev_close = None
+    if hist.empty:
+        df_web, web_prev_close = fetch_yahoo_web_backup(code)
+        if df_web is not None:
+            hist = df_web
+            backup_prev_close = web_prev_close
+            source_used = "web_backup"
 
-        # 計算漲跌幅 (Current vs T-1)
-        if yesterday_close > 0:
-            pct_change = ((current_price_real - yesterday_close) / yesterday_close) * 100
+    if hist.empty: return None
+
+    # --- 時間與資料定位 ---
+    tz = pytz.timezone('Asia/Taipei')
+    now = datetime.now(tz)
+    
+    last_date = hist.index[-1].date()
+    is_today_in_hist = (last_date == now.date())
+    
+    # 盤中界線：13:30 (台股收盤)
+    is_during_trading = (now.time() < dt_time(13, 30))
+    
+    live_price = None
+    if not is_today_in_hist and source_used != "web_backup":
+        live_price = get_live_price(code)
+    
+    # 1. 定位 Today, Prev(T-1), PrePrev(T-2)
+    today_data = None
+    prev_data = None
+    pre_prev_data = None
+    
+    if is_today_in_hist:
+        today_data = hist.iloc[-1]
+        if len(hist) >= 2: prev_data = hist.iloc[-2]
+        if len(hist) >= 3: pre_prev_data = hist.iloc[-3]
+    else:
+        # hist 只到昨日
+        if len(hist) >= 1: prev_data = hist.iloc[-1]
+        if len(hist) >= 2: pre_prev_data = hist.iloc[-2]
+    
+    # 若是網頁備援，手動補上 prev_data 概念
+    if source_used == "web_backup" and backup_prev_close:
+        # 構造一個假的 prev_data 僅含 Close 用於計算漲跌
+        prev_data = pd.Series({'Close': backup_prev_close, 'High': backup_prev_close, 'Low': backup_prev_close}) 
+        # 網頁備援無法取得 T-2
+
+    # 2. 決定 Current Price (顯示用)
+    if is_today_in_hist:
+        current_price_real = today_data['Close']
+    elif live_price:
+        current_price_real = live_price
+    else:
+        current_price_real = prev_data['Close'] if prev_data is not None else 0
+
+    # 3. 決定 Limit Base Price
+    # 盤中: 基準為 T-1 Close
+    # 盤後: 基準為 T Close
+    
+    yesterday_close = prev_data['Close'] if prev_data is not None else current_price_real
+    
+    if is_during_trading:
+        base_price_for_limit = yesterday_close
+    else:
+        # 盤後，基準為今日收盤
+        if is_today_in_hist:
+            base_price_for_limit = today_data['Close']
+        elif live_price:
+            base_price_for_limit = live_price
         else:
-            pct_change = 0.0
+            base_price_for_limit = yesterday_close
 
-        # 計算「顯示用」的漲跌停範圍 (明日預估範圍 or 當日範圍)
-        limit_up_show, limit_down_show = calculate_limits(base_price_for_limit)
-        
-        # 計算「觸及判斷用」的當日漲跌停 (永遠是 T-1 為基準)
-        limit_up_today_real, limit_down_today_real = calculate_limits(yesterday_close)
+    # 計算漲跌幅
+    if yesterday_close > 0:
+        pct_change = ((current_price_real - yesterday_close) / yesterday_close) * 100
+    else:
+        pct_change = 0.0
 
-        # 戰略目標
-        target_raw = current_price_real * 1.03
-        stop_raw = current_price_real * 0.97
-        target_price = apply_sr_rules(target_raw, current_price_real)
-        stop_price = apply_sr_rules(stop_raw, current_price_real)
-        
-        points = []
-        
-        # 5MA
+    limit_up_show, limit_down_show = calculate_limits(base_price_for_limit)
+    limit_up_today_real, limit_down_today_real = calculate_limits(yesterday_close)
+
+    # 戰略目標
+    target_raw = current_price_real * 1.03
+    stop_raw = current_price_real * 0.97
+    target_price = apply_sr_rules(target_raw, current_price_real)
+    stop_price = apply_sr_rules(stop_raw, current_price_real)
+    
+    points = []
+    
+    # 5MA (若資料不足，忽略或僅計算現有)
+    if len(hist) >= 5:
         ma5_raw = hist['Close'].tail(5).mean()
         ma5 = apply_sr_rules(ma5_raw, current_price_real)
         ma5_tag = "多" if ma5_raw < current_price_real else ("空" if ma5_raw > current_price_real else "平")
         points.append({"val": ma5, "tag": ma5_tag, "force": True})
 
-        # 當日 (Today)
-        if is_today_in_hist:
-            points.append({"val": apply_tick_rules(today_data['Open']), "tag": ""})
-            points.append({"val": apply_tick_rules(today_data['High']), "tag": ""})
-            points.append({"val": apply_tick_rules(today_data['Low']), "tag": ""})
-        elif live_price:
-             points.append({"val": apply_tick_rules(live_price), "tag": ""}) # 簡化，只有現價
+    # 當日 (Today)
+    if is_today_in_hist:
+        points.append({"val": apply_tick_rules(today_data['Open']), "tag": ""})
+        points.append({"val": apply_tick_rules(today_data['High']), "tag": ""})
+        points.append({"val": apply_tick_rules(today_data['Low']), "tag": ""})
+    elif live_price:
+         points.append({"val": apply_tick_rules(live_price), "tag": ""})
+    
+    # 昨日 (T-1)
+    if prev_data is not None:
+        p_close = apply_tick_rules(prev_data['Close'])
+        p_high = apply_tick_rules(prev_data['High'])
+        p_low = apply_tick_rules(prev_data['Low'])
         
-        # 昨日 (T-1)
-        if prev_data is not None:
-            p_close = apply_tick_rules(prev_data['Close'])
-            p_high = apply_tick_rules(prev_data['High'])
-            p_low = apply_tick_rules(prev_data['Low'])
-            
-            points.append({"val": p_close, "tag": ""})
-            if limit_down_show <= p_high <= limit_up_show: points.append({"val": p_high, "tag": ""})
-            if limit_down_show <= p_low <= limit_up_show: points.append({"val": p_low, "tag": ""})
+        points.append({"val": p_close, "tag": ""})
+        if limit_down_show <= p_high <= limit_up_show: points.append({"val": p_high, "tag": ""})
+        if limit_down_show <= p_low <= limit_up_show: points.append({"val": p_low, "tag": ""})
 
-        # [新增] 前前日 (T-2)
-        if pre_prev_data is not None:
-            pp_high = apply_tick_rules(pre_prev_data['High'])
-            pp_low = apply_tick_rules(pre_prev_data['Low'])
-            
-            if limit_down_show <= pp_high <= limit_up_show: points.append({"val": pp_high, "tag": ""})
-            if limit_down_show <= pp_low <= limit_up_show: points.append({"val": pp_low, "tag": ""})
+    # 前前日 (T-2)
+    if pre_prev_data is not None:
+        pp_high = apply_tick_rules(pre_prev_data['High'])
+        pp_low = apply_tick_rules(pre_prev_data['Low'])
+        
+        if limit_down_show <= pp_high <= limit_up_show: points.append({"val": pp_high, "tag": ""})
+        if limit_down_show <= pp_low <= limit_up_show: points.append({"val": pp_low, "tag": ""})
 
-        # 近期高低
-        h_pool = [hist['High'].max(), current_price_real]
-        l_pool = [hist['Low'].min(), current_price_real]
-        if is_today_in_hist:
-             h_pool.append(today_data['High'])
-             l_pool.append(today_data['Low'])
-        
-        high_90_raw = max(h_pool)
-        low_90_raw = min(l_pool)
-        high_90 = apply_tick_rules(high_90_raw)
-        low_90 = apply_tick_rules(low_90_raw)
-        
-        points.append({"val": high_90, "tag": "高"})
-        points.append({"val": low_90, "tag": "低"})
+    # 近期高低
+    h_pool = [hist['High'].max(), current_price_real]
+    l_pool = [hist['Low'].min(), current_price_real]
+    if is_today_in_hist:
+         h_pool.append(today_data['High'])
+         l_pool.append(today_data['Low'])
+    
+    high_90_raw = max(h_pool)
+    low_90_raw = min(l_pool)
+    high_90 = apply_tick_rules(high_90_raw)
+    low_90 = apply_tick_rules(low_90_raw)
+    
+    points.append({"val": high_90, "tag": "高"})
+    points.append({"val": low_90, "tag": "低"})
 
-        # 觸及判斷
-        touched_up = False
-        touched_down = False
-        if is_today_in_hist:
-            touched_up = (today_data['High'] >= limit_up_today_real - 0.01)
-            touched_down = (today_data['Low'] <= limit_down_today_real + 0.01)
-        elif live_price:
-            touched_up = (live_price >= limit_up_today_real - 0.01)
-            touched_down = (live_price <= limit_down_today_real + 0.01)
+    # 觸及判斷
+    touched_up = False
+    touched_down = False
+    if is_today_in_hist:
+        touched_up = (today_data['High'] >= limit_up_today_real - 0.01)
+        touched_down = (today_data['Low'] <= limit_down_today_real + 0.01)
+    elif live_price:
+        touched_up = (live_price >= limit_up_today_real - 0.01)
+        touched_down = (live_price <= limit_down_today_real + 0.01)
 
-        if target_price > high_90: points.append({"val": target_price, "tag": ""})
-        if stop_price < low_90: points.append({"val": stop_price, "tag": ""})
+    if target_price > high_90: points.append({"val": target_price, "tag": ""})
+    if stop_price < low_90: points.append({"val": stop_price, "tag": ""})
+    
+    if touched_up: points.append({"val": limit_up_today_real, "tag": "漲停"})
+    if touched_down: points.append({"val": limit_down_today_real, "tag": "跌停"})
         
-        if touched_up: points.append({"val": limit_up_today_real, "tag": "漲停"})
-        if touched_down: points.append({"val": limit_down_today_real, "tag": "跌停"})
-            
-        display_candidates = []
-        for p in points:
-            v = float(f"{p['val']:.2f}")
-            is_force = p.get('force', False)
-            if is_force or (limit_down_show <= v <= limit_up_show):
-                 display_candidates.append(p) 
-            
-        display_candidates.sort(key=lambda x: x['val'])
+    display_candidates = []
+    for p in points:
+        v = float(f"{p['val']:.2f}")
+        is_force = p.get('force', False)
+        if is_force or (limit_down_show <= v <= limit_up_show):
+             display_candidates.append(p) 
         
-        final_display_points = []
-        for val, group in itertools.groupby(display_candidates, key=lambda x: round(x['val'], 2)):
-            g_list = list(group)
-            tags = [x['tag'] for x in g_list if x['tag']]
-            final_tag = ""
-            has_limit_up = "漲停" in tags
-            has_limit_down = "跌停" in tags
-            has_high = "高" in tags
-            has_low = "低" in tags
-            
-            if has_limit_up and has_high: final_tag = "漲停高"
-            elif has_limit_down and has_low: final_tag = "跌停低"
-            elif has_limit_up: final_tag = "漲停"
-            elif has_limit_down: final_tag = "跌停"
-            else:
-                if has_high: final_tag = "高"
-                elif has_low: final_tag = "低"
-                elif "多" in tags: final_tag = "多"
-                elif "空" in tags: final_tag = "空"
-                elif "平" in tags: final_tag = "平"
-            
-            if ("多" in tags or "空" in tags or "平" in tags) and final_tag not in ["漲停", "跌停", "漲停高", "跌停低"]:
-                if "多" in tags: final_tag = "多"
-                elif "空" in tags: final_tag = "空"
-                elif "平" in tags: final_tag = "平"
+    display_candidates.sort(key=lambda x: x['val'])
+    
+    final_display_points = []
+    for val, group in itertools.groupby(display_candidates, key=lambda x: round(x['val'], 2)):
+        g_list = list(group)
+        tags = [x['tag'] for x in g_list if x['tag']]
+        final_tag = ""
+        has_limit_up = "漲停" in tags
+        has_limit_down = "跌停" in tags
+        has_high = "高" in tags
+        has_low = "低" in tags
+        
+        if has_limit_up and has_high: final_tag = "漲停高"
+        elif has_limit_down and has_low: final_tag = "跌停低"
+        elif has_limit_up: final_tag = "漲停"
+        elif has_limit_down: final_tag = "跌停"
+        else:
+            if has_high: final_tag = "高"
+            elif has_low: final_tag = "低"
+            elif "多" in tags: final_tag = "多"
+            elif "空" in tags: final_tag = "空"
+            elif "平" in tags: final_tag = "平"
+        
+        if ("多" in tags or "空" in tags or "平" in tags) and final_tag not in ["漲停", "跌停", "漲停高", "跌停低"]:
+            if "多" in tags: final_tag = "多"
+            elif "空" in tags: final_tag = "空"
+            elif "平" in tags: final_tag = "平"
 
-            final_display_points.append({"val": val, "tag": final_tag})
-            
-        note_parts = []
-        seen_vals = set() 
-        for p in final_display_points:
-            if p['val'] in seen_vals and p['tag'] == "": continue
-            seen_vals.add(p['val'])
-            v_str = fmt_price(p['val'])
-            t = p['tag']
-            if t in ["漲停", "漲停高", "跌停", "跌停低", "高", "低"]: item = f"{t}{v_str}"
-            elif t: item = f"{v_str}{t}"
-            else: item = v_str
-            note_parts.append(item)
+        final_display_points.append({"val": val, "tag": final_tag})
         
-        strategy_note = "-".join(note_parts)
-        full_calc_points = final_display_points
-        
-        final_name = name_hint if name_hint else get_stock_name_online(code)
-        light = "⚪"
-        if "多" in strategy_note: light = "🔴"
-        elif "空" in strategy_note: light = "🟢"
-        final_name_display = f"{light} {final_name}"
-        
-        return {
-            "代號": code, "名稱": final_name_display, "收盤價": round(current_price_real, 2),
-            "漲跌幅": pct_change, "當日漲停價": limit_up_show, "當日跌停價": limit_down_show,
-            "自訂價(可修)": None, "獲利目標": target_price, "防守停損": stop_price,   
-            "戰略備註": strategy_note, "_points": full_calc_points, "狀態": ""
-        }
-    except Exception as e: return None
+    note_parts = []
+    seen_vals = set() 
+    for p in final_display_points:
+        if p['val'] in seen_vals and p['tag'] == "": continue
+        seen_vals.add(p['val'])
+        v_str = fmt_price(p['val'])
+        t = p['tag']
+        if t in ["漲停", "漲停高", "跌停", "跌停低", "高", "低"]: item = f"{t}{v_str}"
+        elif t: item = f"{v_str}{t}"
+        else: item = v_str
+        note_parts.append(item)
+    
+    strategy_note = "-".join(note_parts)
+    full_calc_points = final_display_points
+    
+    final_name = name_hint if name_hint else get_stock_name_online(code)
+    light = "⚪"
+    if "多" in strategy_note: light = "🔴"
+    elif "空" in strategy_note: light = "🟢"
+    final_name_display = f"{light} {final_name}"
+    
+    return {
+        "代號": code, "名稱": final_name_display, "收盤價": round(current_price_real, 2),
+        "漲跌幅": pct_change, "當日漲停價": limit_up_show, "當日跌停價": limit_down_show,
+        "自訂價(可修)": None, "獲利目標": target_price, "防守停損": stop_price,   
+        "戰略備註": strategy_note, "_points": full_calc_points, "狀態": ""
+    }
 
 # ==========================================
 # 主介面 (Tabs)
