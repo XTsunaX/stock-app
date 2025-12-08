@@ -1,8 +1,6 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-import requests
-from bs4 import BeautifulSoup
 import math
 import time
 import os
@@ -67,23 +65,19 @@ def load_data_cache():
         except: return pd.DataFrame(), set()
     return pd.DataFrame(), set()
 
-# [修改] 網址記憶功能：改為讀取列表
 def load_url_history():
     if os.path.exists(URL_CACHE_FILE):
         try:
             with open(URL_CACHE_FILE, "r", encoding='utf-8') as f:
                 data = json.load(f)
-                # 相容性處理：如果舊版是存單一字串，轉為列表
                 if "url" in data and isinstance(data["url"], str) and data["url"]:
                     return [data["url"]]
                 return data.get("urls", [])
         except: return []
     return []
 
-# [修改] 網址記憶功能：儲存列表
 def save_url_history(urls):
     try:
-        # 去除空值與重複 (保持順序)
         unique_urls = []
         seen = set()
         for u in urls:
@@ -112,11 +106,9 @@ if 'calc_base_price' not in st.session_state:
 if 'calc_view_price' not in st.session_state:
     st.session_state.calc_view_price = 100.0
 
-# 載入歷史網址列表
 if 'url_history' not in st.session_state:
     st.session_state.url_history = load_url_history()
 
-# 初始化 cloud_url_input，預設為歷史紀錄的第一筆 (若有)
 if 'cloud_url_input' not in st.session_state:
     st.session_state.cloud_url_input = st.session_state.url_history[0] if st.session_state.url_history else ""
 
@@ -131,8 +123,9 @@ if 'limit_rows' not in st.session_state:
 if 'auto_update_last_row' not in st.session_state:
     st.session_state.auto_update_last_row = saved_config.get('auto_update', True)
 
+# [修正] 預設緩衝改為 4 秒
 if 'update_delay_sec' not in st.session_state:
-    st.session_state.update_delay_sec = saved_config.get('delay_sec', 0.5)
+    st.session_state.update_delay_sec = saved_config.get('delay_sec', 4.0)
 
 # --- 側邊欄設定 ---
 with st.sidebar:
@@ -193,13 +186,10 @@ zoom_level = current_font_size / 14.0
 
 st.markdown(f"""
     <style>
-    /* 表格容器縮放 */
     div[data-testid="stDataFrame"] {{
         width: 100%;
         zoom: {zoom_level};
     }}
-    
-    /* 只針對表格內的元素設定字體 */
     div[data-testid="stDataFrame"] table, 
     div[data-testid="stDataFrame"] thead, 
     div[data-testid="stDataFrame"] tbody, 
@@ -211,21 +201,14 @@ st.markdown(f"""
     div[data-testid="stDataFrame"] p {{
         font-family: 'Microsoft JhengHei', sans-serif !important;
     }}
-
-    /* 輸入框字體修正 */
     div[data-testid="stDataFrame"] input {{
         font-family: 'Microsoft JhengHei', sans-serif !important;
         font-size: 0.9rem !important; 
     }}
-    
-    /* 隱藏索引 */
     thead tr th:first-child {{ display:none }}
     tbody th {{ display:none }}
-    
     .block-container {{ padding-top: 4.5rem; padding-bottom: 1rem; }}
     [data-testid="stMetricValue"] {{ font-size: 1.2em; }}
-    
-    /* 移除欄位內距，讓元件更緊湊 */
     div[data-testid="column"] {{
         padding-left: 0.1rem !important;
         padding-right: 0.1rem !important;
@@ -265,35 +248,6 @@ def search_code_online(query):
     if query.isdigit(): return query
     _, name_map = load_local_stock_names()
     if query in name_map: return name_map[query]
-    return None
-
-def get_live_price(code):
-    """
-    抓取當下即時成交價 (雙重備援)。
-    """
-    # 1. 嘗試 twstock
-    try:
-        realtime_data = twstock.realtime.get(code)
-        if realtime_data and realtime_data.get('success'):
-            price_str = realtime_data['realtime'].get('latest_trade_price')
-            if price_str and price_str != '-' and float(price_str) > 0:
-                return float(price_str)
-            bids = realtime_data['realtime'].get('best_bid_price', [])
-            if bids and bids[0] and bids[0] != '-':
-                 return float(bids[0])
-    except: pass
-
-    # 2. 備援 yfinance fast_info
-    try:
-        ticker = yf.Ticker(f"{code}.TW")
-        price = ticker.fast_info.get('last_price')
-        if price and not math.isnan(price): return float(price)
-        
-        ticker = yf.Ticker(f"{code}.TWO")
-        price = ticker.fast_info.get('last_price')
-        if price and not math.isnan(price): return float(price)
-    except: pass
-    
     return None
 
 # ==========================================
@@ -408,7 +362,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     try:
         time.sleep(0.1)
         
-        # 1. 優先嘗試 yfinance (歷史分析用)
+        # 1. 優先嘗試 yfinance
         ticker = yf.Ticker(f"{code}.TW")
         hist = ticker.history(period="3mo") 
         if hist.empty:
@@ -461,8 +415,16 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         target_price = apply_sr_rules(target_raw, current_price)
         stop_price = apply_sr_rules(stop_raw, current_price)
         
-        limit_up_next, limit_down_next = calculate_limits(current_price) 
-        limit_up_today, limit_down_today = calculate_limits(prev_day['Close'])
+        # [修正] 盤中盤後漲跌停價邏輯
+        # 盤中: 基準是「昨日收盤」 (因為今天是動態的，限制也是基於昨日)
+        # 盤後: 基準是「今日收盤」 (為明天做準備)
+        if is_during_trading:
+            base_price_for_limit = prev_day['Close']
+        else:
+            base_price_for_limit = current_price
+            
+        limit_up_show, limit_down_show = calculate_limits(base_price_for_limit)
+        limit_up_today, limit_down_today = calculate_limits(prev_day['Close']) # For touch detection
 
         points = []
         
@@ -483,8 +445,8 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         p_low = apply_tick_rules(prev_day['Low'])
         
         points.append({"val": p_close, "tag": ""})
-        if limit_down_next <= p_high <= limit_up_next: points.append({"val": p_high, "tag": ""})
-        if limit_down_next <= p_low <= limit_up_next: points.append({"val": p_low, "tag": ""})
+        if limit_down_show <= p_high <= limit_up_show: points.append({"val": p_high, "tag": ""})
+        if limit_down_show <= p_low <= limit_up_show: points.append({"val": p_low, "tag": ""})
         
         # 近期高低
         high_90_raw = max(hist['High'].max(), today['High'], current_price)
@@ -495,7 +457,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         points.append({"val": high_90, "tag": "高"})
         points.append({"val": low_90, "tag": "低"})
 
-        # 觸及
+        # 觸及 (判斷是否碰到今日的漲跌停)
         touched_up = (today['High'] >= limit_up_today - 0.01) or (abs(current_price - limit_up_today) < 0.01)
         touched_down = (today['Low'] <= limit_down_today + 0.01) or (abs(current_price - limit_down_today) < 0.01)
         
@@ -508,7 +470,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         for p in points:
             v = float(f"{p['val']:.2f}")
             is_force = p.get('force', False)
-            if is_force or (limit_down_next <= v <= limit_up_next):
+            if is_force or (limit_down_show <= v <= limit_up_show):
                  display_candidates.append(p) 
             
         display_candidates.sort(key=lambda x: x['val'])
@@ -562,9 +524,10 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         elif "空" in strategy_note: light = "🟢"
         final_name_display = f"{light} {final_name}"
         
+        # 回傳
         return {
             "代號": code, "名稱": final_name_display, "收盤價": round(current_price, 2),
-            "漲跌幅": pct_change, "當日漲停價": limit_up_next, "當日跌停價": limit_down_next,
+            "漲跌幅": pct_change, "當日漲停價": limit_up_show, "當日跌停價": limit_down_show,
             "自訂價(可修)": None, "獲利目標": target_price, "防守停損": stop_price,   
             "戰略備註": strategy_note, "_points": full_calc_points, "狀態": ""
         }
@@ -597,15 +560,11 @@ with tab1:
                 except: pass
 
         with src_tab2:
-            # 1. 歷史紀錄下拉選單 (佔滿一行)
-            # 使用 callback 當選單改變時更新 input
             def on_history_change():
                 st.session_state.cloud_url_input = st.session_state.history_selected
 
-            # 建立選項 (包含預設空選項)
             history_opts = st.session_state.url_history if st.session_state.url_history else ["(無紀錄)"]
             
-            # 使用 columns 來放置選單和刪除按鈕
             c_sel, c_del = st.columns([8, 1], gap="small")
             
             with c_sel:
@@ -627,7 +586,6 @@ with tab1:
                         st.toast("已刪除。", icon="🗑️")
                         st.rerun()
 
-            # 2. 輸入框 (在選單下方)
             st.text_input(
                 "輸入連結 (CSV/Excel/Google Sheet)", 
                 key="cloud_url_input",
@@ -640,11 +598,10 @@ with tab1:
         targets = []
         df_up = pd.DataFrame()
         
-        # [新增] 自動儲存網址至歷史紀錄
         current_url = st.session_state.cloud_url_input.strip()
         if current_url:
             if current_url not in st.session_state.url_history:
-                st.session_state.url_history.insert(0, current_url) # 加在最前面
+                st.session_state.url_history.insert(0, current_url) 
                 save_url_history(st.session_state.url_history)
         
         try:
@@ -858,7 +815,7 @@ with tab1:
                     st.session_state.stock_data.at[i, '狀態'] = new_status
             st.rerun()
 
-        # [UI調整] 垂直排序: 1.按鈕 2.自動更新設定 3.同步設定
+        # [UI調整] 1.按鈕 2.開關 3.緩衝秒數 (垂直排序)
         st.markdown("---")
         
         # 1. 執行更新按鈕 (縮小版)
@@ -866,46 +823,33 @@ with tab1:
         with col_btn:
             btn_update = st.button("⚡ 執行更新", use_container_width=False, type="primary")
         
-        # 2. 自動更新設定 (使用極小間距)
-        # 用 columns 將 checkbox 和 number_input 放同一行緊密排列
-        c_auto, c_buff, _ = st.columns([2.5, 1.5, 6], gap="small")
-        with c_auto:
-            auto_update = st.checkbox("☑️ 啟用最後一列自動更新", 
-                value=st.session_state.auto_update_last_row,
-                key="toggle_auto_update")
-            st.session_state.auto_update_last_row = auto_update
-        with c_buff:
-            if auto_update:
-                delay_val = st.number_input("⏳ 緩衝秒數", 
+        # 2. 自動更新設定 (垂直堆疊)
+        auto_update = st.checkbox("☑️ 啟用最後一列自動更新", 
+            value=st.session_state.auto_update_last_row,
+            key="toggle_auto_update")
+        st.session_state.auto_update_last_row = auto_update
+        
+        # 3. 緩衝秒數 (如果有啟用自動更新才顯示)
+        if auto_update:
+            # 調整數字輸入框的寬度，不要佔滿整行
+            c_delay, _ = st.columns([2, 8])
+            with c_delay:
+                delay_val = st.number_input("⏳ 緩衝秒數 (Enter後等待)", 
                     min_value=0.0, max_value=5.0, step=0.1, 
                     value=st.session_state.update_delay_sec)
                 st.session_state.update_delay_sec = delay_val
 
-        # 3. 同步股價設定
-        sync_price = st.checkbox("同步當下股價至自訂價", 
-            key="toggle_sync_price",
-            help="勾選後，按下「執行更新」按鈕，將自動抓取即時成交價填入")
-
-        # 按鈕邏輯
+        # 按鈕邏輯 (單純重算，不抓股價)
         if btn_update:
              update_map = edited_df.set_index('代號')[['自訂價(可修)', '戰略備註']].to_dict('index')
-             
              for i, row in st.session_state.stock_data.iterrows():
                 code = row['代號']
-                
-                if sync_price:
-                    live_p = get_live_price(code)
-                    if live_p is not None:
-                        st.session_state.stock_data.at[i, '自訂價(可修)'] = live_p
-                        if code in update_map: update_map[code]['自訂價(可修)'] = live_p
-                
-                elif code in update_map:
+                if code in update_map:
                     st.session_state.stock_data.at[i, '自訂價(可修)'] = update_map[code]['自訂價(可修)']
                     st.session_state.stock_data.at[i, '戰略備註'] = update_map[code]['戰略備註']
                 
                 new_status = recalculate_row(st.session_state.stock_data.iloc[i], points_map)
                 st.session_state.stock_data.at[i, '狀態'] = new_status
-             
              st.rerun()
 
 with tab2:
