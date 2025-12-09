@@ -529,20 +529,39 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     source_used = "none"
     backup_prev_close = None
 
+    # [NEW] 檢查資料新鮮度與有效性
+    def is_valid_data(df_check):
+        if df_check is None or df_check.empty: return False
+        try:
+            # 1. 檢查最後收盤價是否為0
+            if df_check.iloc[-1]['Close'] <= 0: return False
+            
+            # 2. 檢查日期是否過舊 (超過5天沒更新視為資料源異常，例如 8110 yfinance 停更)
+            last_dt = df_check.index[-1]
+            if last_dt.tzinfo is not None:
+                last_dt = last_dt.astimezone(pytz.timezone('Asia/Taipei')).replace(tzinfo=None)
+            now_dt = datetime.now().replace(tzinfo=None)
+            
+            if (now_dt - last_dt).days > 5:
+                return False
+            return True
+        except: return False
+
     # 1. 第一順位: YFinance
     try:
         ticker = yf.Ticker(f"{code}.TW")
         hist_yf = ticker.history(period="3mo")
-        if hist_yf.empty:
+        # 嘗試 TWO
+        if hist_yf.empty or not is_valid_data(hist_yf):
             ticker = yf.Ticker(f"{code}.TWO")
             hist_yf = ticker.history(period="3mo")
         
-        if not hist_yf.empty:
+        if not hist_yf.empty and is_valid_data(hist_yf):
             hist = hist_yf
             source_used = "yfinance"
     except: pass
 
-    # 2. 第二順位: TWStock
+    # 2. 第二順位: TWStock (若 YF 失敗或過期)
     if hist.empty:
         try:
             stock = twstock.Stock(code)
@@ -556,7 +575,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
                 cols = ['Open', 'High', 'Low', 'Close', 'Volume']
                 for c in cols: df_tw[c] = pd.to_numeric(df_tw[c], errors='coerce')
                 
-                if not df_tw.empty:
+                if not df_tw.empty and is_valid_data(df_tw):
                     hist = df_tw[cols]
                     source_used = "twstock"
         except: pass
@@ -564,14 +583,14 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     # 3. 第三順位: FinMind
     if hist.empty:
         df_fm = fetch_finmind_backup(code)
-        if df_fm is not None and not df_fm.empty:
+        if df_fm is not None and not df_fm.empty and is_valid_data(df_fm):
             hist = df_fm
             source_used = "finmind"
 
-    # 4. 第四順位: Yahoo 網頁爬蟲
+    # 4. 第四順位: Yahoo 網頁爬蟲 (通常是當日的，不用檢查 3mo)
     if hist.empty:
         df_web, web_prev_close = fetch_yahoo_web_backup(code)
-        if df_web is not None:
+        if df_web is not None and not df_web.empty:
             hist = df_web
             backup_prev_close = web_prev_close
             source_used = "web_backup"
@@ -676,7 +695,13 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     
     if not hist_strat.empty:
         high_90_raw = hist_strat['High'].max()
-        low_90_raw = hist_strat['Low'].min()
+        # [Fix] 排除 0 值以免 Low90 變成 0
+        low_vals = hist_strat['Low'][hist_strat['Low'] > 0]
+        if not low_vals.empty:
+            low_90_raw = low_vals.min()
+        else:
+            low_90_raw = hist_strat['Low'].min()
+            
         high_90 = apply_tick_rules(high_90_raw)
         low_90 = apply_tick_rules(low_90_raw)
         
@@ -722,7 +747,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
                 second_high = sorted_highs[1]
                 points.append({"val": apply_tick_rules(second_high), "tag": ""})
         else:
-            # 隔日漲停也碰不到 High90 -> 顯示
+            # 隔日漲停也碰不到 High90 (High90 太高) -> 顯示
             if limit_up_show < high_90:
                 show_plus_3 = True
             else:
@@ -732,12 +757,14 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         is_new_low = abs(strategy_base_price - low_90_raw) < 0.05
         if is_new_low:
             show_minus_3 = True
-            sorted_lows = hist_strat['Low'].sort_values(ascending=True).unique()
+            sorted_lows = hist_strat['Low'][hist_strat['Low'] > 0].sort_values(ascending=True).unique()
             if len(sorted_lows) > 1:
                 second_low = sorted_lows[1]
                 points.append({"val": apply_tick_rules(second_low), "tag": ""})
         else:
-             # 隔日跌停也碰不到 Low90 -> 顯示
+             # 隔日跌停也碰不到 Low90 (Low90 太低) -> 顯示
+             # 注意: 這裡 Low90 是支撐。如果 LimitDown (90) > Low90 (80)，代表殺到跌停也碰不到支撐。
+             # 所以需要 -3% 當中間目標。
             if limit_down_show > low_90:
                 show_minus_3 = True
             else:
