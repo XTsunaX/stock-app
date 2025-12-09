@@ -683,23 +683,52 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         points.append({"val": high_90, "tag": "高"})
         points.append({"val": low_90, "tag": "低"})
         
-        # 1. 檢查是否創新高 (Current ~ High90)
+        # [NEW] 檢查近期高點是否為該日漲停價
+        is_limit_high = False
+        try:
+            for i in range(1, len(hist_strat)):
+                if abs(hist_strat.iloc[i]['High'] - high_90_raw) < 0.01:
+                    prev_c = hist_strat.iloc[i-1]['Close']
+                    l_up, _ = calculate_limits(prev_c)
+                    if abs(high_90_raw - l_up) < 0.01:
+                        is_limit_high = True
+                        break
+        except: pass
+        if is_limit_high: points.append({"val": high_90, "tag": "漲停"})
+        
+        # [NEW] 檢查近期低點是否為該日跌停價
+        is_limit_low = False
+        try:
+            for i in range(1, len(hist_strat)):
+                if abs(hist_strat.iloc[i]['Low'] - low_90_raw) < 0.01:
+                    prev_c = hist_strat.iloc[i-1]['Close']
+                    _, l_down = calculate_limits(prev_c)
+                    if abs(low_90_raw - l_down) < 0.01:
+                        is_limit_low = True
+                        break
+        except: pass
+        if is_limit_low: points.append({"val": low_90, "tag": "跌停"})
+
+        # [修正] +3% / -3% 顯示邏輯
+        # (1) 股價創新高(低)，無近日高(低)點 -> 顯示
+        # (2) 隔日收盤價(漲跌停)無法到達當日高(低)點 -> 顯示
+        
+        # +3% Logic
         is_new_high = abs(strategy_base_price - high_90_raw) < 0.05
         if is_new_high:
-            show_plus_3 = True # 創新高，無壓力，顯示目標
-            # 尋找次高作為支撐
+            show_plus_3 = True 
             sorted_highs = hist_strat['High'].sort_values(ascending=False).unique()
             if len(sorted_highs) > 1:
                 second_high = sorted_highs[1]
                 points.append({"val": apply_tick_rules(second_high), "tag": ""})
         else:
-            # 沒創新高，檢查 High90 是否在明日漲停內
-            if high_90 > limit_up_show:
-                show_plus_3 = True # 高點太遠，顯示 +3% 當目標
+            # 隔日漲停也碰不到 High90 -> 顯示
+            if limit_up_show < high_90:
+                show_plus_3 = True
             else:
-                show_plus_3 = False # 高點可及，不顯示 +3%
+                show_plus_3 = False
 
-        # 2. 檢查是否創新低
+        # -3% Logic
         is_new_low = abs(strategy_base_price - low_90_raw) < 0.05
         if is_new_low:
             show_minus_3 = True
@@ -708,7 +737,8 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
                 second_low = sorted_lows[1]
                 points.append({"val": apply_tick_rules(second_low), "tag": ""})
         else:
-            if low_90 < limit_down_show:
+             # 隔日跌停也碰不到 Low90 -> 顯示
+            if limit_down_show > low_90:
                 show_minus_3 = True
             else:
                 show_minus_3 = False
