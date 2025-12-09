@@ -8,6 +8,7 @@ import time
 import os
 import itertools
 import json
+import re  # [新增] 用於解析備註文字
 from datetime import datetime, time as dt_time, timedelta
 import pytz
 from decimal import Decimal, ROUND_HALF_UP
@@ -483,6 +484,7 @@ def recalculate_row(row, points_map):
     code = row.get('代號')
     status = ""
     if pd.isna(custom_price) or str(custom_price).strip() == "": return status
+    
     try:
         price = float(custom_price)
         limit_up = row.get('當日漲停價')
@@ -491,14 +493,32 @@ def recalculate_row(row, points_map):
         l_up = float(limit_up) if limit_up and str(limit_up).replace('.','').isdigit() else None
         l_down = float(limit_down) if limit_down and str(limit_down).replace('.','').isdigit() else None
         
-        if l_up is not None and abs(price - l_up) < 0.01: status = "🔴 漲停"
-        elif l_down is not None and abs(price - l_down) < 0.01: status = "🟢 跌停"
+        if l_up is not None and abs(price - l_up) < 0.01: 
+            status = "🔴 漲停"
+        elif l_down is not None and abs(price - l_down) < 0.01: 
+            status = "🟢 跌停"
         else:
+            # 1. 檢查後台計算點位
             points = points_map.get(code, [])
+            hit = False
             if isinstance(points, list):
                 for p in points:
                     if abs(p['val'] - price) < 0.01:
-                        status = "🟡 命中"; break
+                        hit = True; break
+            
+            # 2. [新增] 檢查手動備註內的數字
+            if not hit:
+                note_text = str(row.get('戰略備註', ''))
+                # 抓取所有浮點數或整數
+                found_prices = re.findall(r'\d+\.?\d*', note_text)
+                for fp in found_prices:
+                    try:
+                        if abs(float(fp) - price) < 0.01:
+                            hit = True; break
+                    except: pass
+            
+            if hit: status = "🟡 命中"
+            
         return status
     except: return status
 
@@ -631,7 +651,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     
     points = []
     
-    # 5MA (若資料不足，忽略)
+    # 5MA
     if len(hist) >= 5:
         ma5_raw = hist['Close'].tail(5).mean()
         ma5 = apply_sr_rules(ma5_raw, current_price_real)
@@ -646,13 +666,13 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     elif live_price:
          points.append({"val": apply_tick_rules(live_price), "tag": ""})
     
-    # 昨日 (T-1)
+    # 昨日 (T-1) [修正: 僅當 PrevClose 為特殊點時才加入，或保留 High/Low]
     if prev_data is not None:
         p_close = apply_tick_rules(prev_data['Close'])
         p_high = apply_tick_rules(prev_data['High'])
         p_low = apply_tick_rules(prev_data['Low'])
         
-        points.append({"val": p_close, "tag": ""})
+        # 只加昨日高低，不預設加收盤
         if limit_down_show <= p_high <= limit_up_show: points.append({"val": p_high, "tag": ""})
         if limit_down_show <= p_low <= limit_up_show: points.append({"val": p_low, "tag": ""})
 
@@ -664,7 +684,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         if limit_down_show <= pp_high <= limit_up_show: points.append({"val": pp_high, "tag": ""})
         if limit_down_show <= pp_low <= limit_up_show: points.append({"val": pp_low, "tag": ""})
 
-    # 近期高低
+    # 近期高低 (含自動遞補邏輯)
     h_pool = [hist['High'].max(), current_price_real]
     l_pool = [hist['Low'].min(), current_price_real]
     if is_today_in_hist:
@@ -678,6 +698,44 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     
     points.append({"val": high_90, "tag": "高"})
     points.append({"val": low_90, "tag": "低"})
+
+    # [新增] 檢查今日收盤(Current)是否觸及近期高低，若觸及則尋找「次高/次低」
+    # 邏輯：如果 High90 幾乎等於 Current，則在歷史中找第二高的 High
+    if abs(current_price_real - high_90_raw) < 0.05:
+        # 尋找次高
+        try:
+            # 排除今日的高點，找過去歷史的最大值
+            past_highs = hist['High'][:-1] if is_today_in_hist else hist['High']
+            if not past_highs.empty:
+                second_high_raw = past_highs.max()
+                # 如果歷史最大值比 High90 小很多，它就是次高；如果差不多，可能是一樣的平頭
+                if second_high_raw < high_90_raw - 0.05:
+                    points.append({"val": apply_tick_rules(second_high_raw), "tag": ""})
+                else:
+                    # 如果歷史高點跟今日一樣，那找歷史中的「第二大」
+                    sorted_highs = past_highs.sort_values(ascending=False).unique()
+                    if len(sorted_highs) > 1:
+                        points.append({"val": apply_tick_rules(sorted_highs[1]), "tag": ""})
+                    else:
+                        # 真的找不到，用 +3% 替代 (Target Price)
+                        pass 
+        except: pass
+
+    if abs(current_price_real - low_90_raw) < 0.05:
+        # 尋找次低
+        try:
+            past_lows = hist['Low'][:-1] if is_today_in_hist else hist['Low']
+            if not past_lows.empty:
+                second_low_raw = past_lows.min()
+                if second_low_raw > low_90_raw + 0.05:
+                    points.append({"val": apply_tick_rules(second_low_raw), "tag": ""})
+                else:
+                    sorted_lows = past_lows.sort_values(ascending=True).unique()
+                    if len(sorted_lows) > 1:
+                        points.append({"val": apply_tick_rules(sorted_lows[1]), "tag": ""})
+                    else:
+                        pass
+        except: pass
 
     # 觸及判斷
     touched_up = False
