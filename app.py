@@ -533,10 +533,17 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     def is_valid_data(df_check, code):
         if df_check is None or df_check.empty: return False
         try:
+            last_row = df_check.iloc[-1]
+            last_price = last_row['Close']
+            
             # 1. 檢查最後收盤價是否為0
-            last_price = df_check.iloc[-1]['Close']
             if last_price <= 0: return False
             
+            # [NEW] K棒合理性檢查: High 不能小於 Close, Low 不能大於 Close
+            # 如果發生這種情況，代表資料源不完整 (如 yfinance 有時發生)
+            if last_row['High'] < last_price or last_row['Low'] > last_price:
+                return False
+
             # 2. 檢查日期是否過舊 (超過3天沒更新視為資料源異常)
             last_dt = df_check.index[-1]
             if last_dt.tzinfo is not None:
@@ -546,14 +553,14 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             if (now_dt - last_dt).days > 3:
                 return False
 
-            # 3. [NEW] 價格比對 Sanity Check (若今日有即時價，比對是否偏差過大)
+            # 3. 價格比對 Sanity Check (若今日有即時價，比對是否偏差過大)
             # 只有當資料日期是今天時才強烈比對，避免盤後與隔日開盤差異
             is_same_day = (last_dt.date() == now_dt.date())
             if is_same_day:
                 live_price = get_live_price(code)
                 if live_price:
                     diff_pct = abs(last_price - live_price) / live_price
-                    if diff_pct > 0.05: # 差異超過 5% 視為異常 (可能是未還原權值或錯誤數據)
+                    if diff_pct > 0.05: # 差異超過 5% 視為異常
                         return False
 
             return True
@@ -604,10 +611,18 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         df_web, web_prev_close = fetch_yahoo_web_backup(code)
         if df_web is not None and not df_web.empty:
             hist = df_web
+            # 針對爬蟲資料最後一層保護: 若 High < Close 則修正 High
+            hist['High'] = hist[['High', 'Close']].max(axis=1)
+            hist['Low'] = hist[['Low', 'Close']].min(axis=1)
+            
             backup_prev_close = web_prev_close
             source_used = "web_backup"
 
     if hist.empty: return None
+
+    # --- 最後的資料清理 (防止任何來源的 High < Close) ---
+    hist['High'] = hist[['High', 'Close']].max(axis=1)
+    hist['Low'] = hist[['Low', 'Close']].min(axis=1)
 
     # --- 時間與資料定位 ---
     tz = pytz.timezone('Asia/Taipei')
