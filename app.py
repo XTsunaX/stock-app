@@ -529,21 +529,33 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     source_used = "none"
     backup_prev_close = None
 
-    # [NEW] 檢查資料新鮮度與有效性
-    def is_valid_data(df_check):
+    # [NEW] 檢查資料新鮮度與價格合理性 (針對 8110 等異常數據)
+    def is_valid_data(df_check, code):
         if df_check is None or df_check.empty: return False
         try:
             # 1. 檢查最後收盤價是否為0
-            if df_check.iloc[-1]['Close'] <= 0: return False
+            last_price = df_check.iloc[-1]['Close']
+            if last_price <= 0: return False
             
-            # 2. 檢查日期是否過舊 (超過5天沒更新視為資料源異常，例如 8110 yfinance 停更)
+            # 2. 檢查日期是否過舊 (超過3天沒更新視為資料源異常)
             last_dt = df_check.index[-1]
             if last_dt.tzinfo is not None:
                 last_dt = last_dt.astimezone(pytz.timezone('Asia/Taipei')).replace(tzinfo=None)
             now_dt = datetime.now().replace(tzinfo=None)
             
-            if (now_dt - last_dt).days > 5:
+            if (now_dt - last_dt).days > 3:
                 return False
+
+            # 3. [NEW] 價格比對 Sanity Check (若今日有即時價，比對是否偏差過大)
+            # 只有當資料日期是今天時才強烈比對，避免盤後與隔日開盤差異
+            is_same_day = (last_dt.date() == now_dt.date())
+            if is_same_day:
+                live_price = get_live_price(code)
+                if live_price:
+                    diff_pct = abs(last_price - live_price) / live_price
+                    if diff_pct > 0.05: # 差異超過 5% 視為異常 (可能是未還原權值或錯誤數據)
+                        return False
+
             return True
         except: return False
 
@@ -552,16 +564,16 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         ticker = yf.Ticker(f"{code}.TW")
         hist_yf = ticker.history(period="3mo")
         # 嘗試 TWO
-        if hist_yf.empty or not is_valid_data(hist_yf):
+        if hist_yf.empty or not is_valid_data(hist_yf, code):
             ticker = yf.Ticker(f"{code}.TWO")
             hist_yf = ticker.history(period="3mo")
         
-        if not hist_yf.empty and is_valid_data(hist_yf):
+        if not hist_yf.empty and is_valid_data(hist_yf, code):
             hist = hist_yf
             source_used = "yfinance"
     except: pass
 
-    # 2. 第二順位: TWStock (若 YF 失敗或過期)
+    # 2. 第二順位: TWStock (若 YF 失敗或過期或價格異常)
     if hist.empty:
         try:
             stock = twstock.Stock(code)
@@ -575,7 +587,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
                 cols = ['Open', 'High', 'Low', 'Close', 'Volume']
                 for c in cols: df_tw[c] = pd.to_numeric(df_tw[c], errors='coerce')
                 
-                if not df_tw.empty and is_valid_data(df_tw):
+                if not df_tw.empty and is_valid_data(df_tw, code):
                     hist = df_tw[cols]
                     source_used = "twstock"
         except: pass
@@ -583,7 +595,7 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     # 3. 第三順位: FinMind
     if hist.empty:
         df_fm = fetch_finmind_backup(code)
-        if df_fm is not None and not df_fm.empty and is_valid_data(df_fm):
+        if df_fm is not None and not df_fm.empty and is_valid_data(df_fm, code):
             hist = df_fm
             source_used = "finmind"
 
@@ -734,41 +746,43 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         except: pass
         if is_limit_low: points.append({"val": low_90, "tag": "跌停"})
 
-        # [修正] +3% / -3% 顯示邏輯
-        # (1) 股價創新高(低)，無近日高(低)點 -> 顯示
-        # (2) 隔日收盤價(漲跌停)無法到達當日高(低)點 -> 顯示
+        # ==========================================
+        # [NEW Logic] +3% / -3% 顯示邏輯 (User Request)
+        # 1. 盤中有觸及漲跌停價
+        # 2. 且收盤價為漲跌停價正負3%內 -> 顯示
+        # ==========================================
         
-        # +3% Logic
-        is_new_high = abs(strategy_base_price - high_90_raw) < 0.05
-        if is_new_high:
-            show_plus_3 = True 
-            sorted_highs = hist_strat['High'].sort_values(ascending=False).unique()
-            if len(sorted_highs) > 1:
-                second_high = sorted_highs[1]
-                points.append({"val": apply_tick_rules(second_high), "tag": ""})
-        else:
-            # 隔日漲停也碰不到 High90 (High90 太高) -> 顯示
-            if limit_up_show < high_90:
+        # 計算 T 日的漲跌停價 (需用 T-1 的收盤價計算)
+        if len(hist_strat) >= 2:
+            prev_close_T = hist_strat.iloc[-2]['Close']
+            limit_up_T, limit_down_T = calculate_limits(prev_close_T)
+            
+            # T 日數據
+            high_T = hist_strat.iloc[-1]['High']
+            low_T = hist_strat.iloc[-1]['Low']
+            close_T = hist_strat.iloc[-1]['Close']
+            
+            # 判斷是否觸及漲停
+            touched_limit_up = (high_T >= limit_up_T - 0.01) # 浮點數容差
+            # 判斷是否觸及跌停
+            touched_limit_down = (low_T <= limit_down_T + 0.01)
+            
+            # 邏輯 1: +3% (觸及漲停 且 收盤在漲停3%內)
+            # 3% 內 = Close >= LimitUp * 0.97
+            if touched_limit_up and (close_T >= limit_up_T * 0.97):
                 show_plus_3 = True
             else:
                 show_plus_3 = False
-
-        # -3% Logic
-        is_new_low = abs(strategy_base_price - low_90_raw) < 0.05
-        if is_new_low:
-            show_minus_3 = True
-            sorted_lows = hist_strat['Low'][hist_strat['Low'] > 0].sort_values(ascending=True).unique()
-            if len(sorted_lows) > 1:
-                second_low = sorted_lows[1]
-                points.append({"val": apply_tick_rules(second_low), "tag": ""})
-        else:
-             # 隔日跌停也碰不到 Low90 (Low90 太低) -> 顯示
-             # 注意: 這裡 Low90 是支撐。如果 LimitDown (90) > Low90 (80)，代表殺到跌停也碰不到支撐。
-             # 所以需要 -3% 當中間目標。
-            if limit_down_show > low_90:
+                
+            # 邏輯 2: -3% (觸及跌停 且 收盤在跌停3%內)
+            # 3% 內 = Close <= LimitDown * 1.03
+            if touched_limit_down and (close_T <= limit_down_T * 1.03):
                 show_minus_3 = True
             else:
                 show_minus_3 = False
+        else:
+            show_plus_3 = False
+            show_minus_3 = False
 
     if show_plus_3: points.append({"val": target_price, "tag": ""})
     if show_minus_3: points.append({"val": stop_price, "tag": ""})
