@@ -1128,12 +1128,12 @@ with tab1:
             df_display[input_cols],
             column_config={
                 "移除": st.column_config.CheckboxColumn("刪除", width=40, help="勾選後刪除並自動遞補"),
-                "代號": st.column_config.TextColumn(disabled=True, width=50), # [Fix] 50px
+                "代號": st.column_config.TextColumn(disabled=True, width=50), 
                 "名稱": st.column_config.TextColumn(disabled=True, width="small"),
                 "收盤價": st.column_config.TextColumn(width="small", disabled=True),
                 "漲跌幅": st.column_config.TextColumn(disabled=True, width="small"),
                 "期貨": st.column_config.TextColumn(disabled=True, width=40), 
-                "自訂價(可修)": st.column_config.TextColumn("自訂價 ✏️", width=60), # [Fix] 60px
+                "自訂價(可修)": st.column_config.TextColumn("自訂價 ✏️", width=60), 
                 "當日漲停價": st.column_config.TextColumn(width="small", disabled=True),
                 "當日跌停價": st.column_config.TextColumn(width="small", disabled=True),
                 "+3%": st.column_config.TextColumn(width="small", disabled=True),
@@ -1146,18 +1146,86 @@ with tab1:
             num_rows="fixed",
             key="main_editor"
         )
+        
+        # [FIXED] 修正輸入焦點重整問題：改為延遲更新策略
+        # 僅在 "刪除" 或 "最後一列自動更新" 或 "按鈕" 觸發時才寫入 session_state
+        if not edited_df.empty:
+            trigger_rerun = False
+            
+            # 1. 優先處理刪除 (結構改變)
+            if "移除" in edited_df.columns:
+                to_remove = edited_df[edited_df["移除"] == True]
+                if not to_remove.empty:
+                    # 先同步所有編輯狀態
+                    update_map = edited_df.set_index('代號')[['自訂價(可修)', '戰略備註']].to_dict('index')
+                    for i, row in st.session_state.stock_data.iterrows():
+                        code = row['代號']
+                        if code in update_map:
+                            new_price = update_map[code]['自訂價(可修)']
+                            new_note = update_map[code]['戰略備註']
+                            st.session_state.stock_data.at[i, '自訂價(可修)'] = new_price
+                            # 處理備註記憶
+                            if str(row['戰略備註']) != str(new_note):
+                                base_auto = auto_notes_dict.get(code, "")
+                                pure_manual = new_note
+                                if base_auto and new_note.startswith(base_auto):
+                                    pure_manual = new_note[len(base_auto):].strip()
+                                st.session_state.stock_data.at[i, '戰略備註'] = new_note
+                                st.session_state.saved_notes[code] = pure_manual
 
-        if not edited_df.empty and "移除" in edited_df.columns:
-            to_remove = edited_df[edited_df["移除"] == True]
-            if not to_remove.empty:
-                remove_codes = to_remove["代號"].unique()
-                for c in remove_codes:
-                    st.session_state.ignored_stocks.add(str(c))
-                
-                st.session_state.stock_data = st.session_state.stock_data[
-                    ~st.session_state.stock_data["代號"].isin(remove_codes)
-                ]
-                
+                    remove_codes = to_remove["代號"].unique()
+                    for c in remove_codes:
+                        st.session_state.ignored_stocks.add(str(c))
+                    
+                    st.session_state.stock_data = st.session_state.stock_data[
+                        ~st.session_state.stock_data["代號"].isin(remove_codes)
+                    ]
+                    trigger_rerun = True
+
+            # 2. 檢查最後一列是否變動 (自動更新觸發)
+            if not trigger_rerun and st.session_state.auto_update_last_row:
+                last_visible_idx = len(edited_df) - 1
+                if last_visible_idx >= 0:
+                    last_visible_code = edited_df.iloc[last_visible_idx]['代號']
+                    update_map = edited_df.set_index('代號')[['自訂價(可修)', '戰略備註']].to_dict('index')
+                    
+                    # 檢查最後一列價格是否改變
+                    for i, row in st.session_state.stock_data.iterrows():
+                        if row['代號'] == last_visible_code:
+                            if code in update_map: # Bug fix check
+                                pass
+                            if last_visible_code in update_map:
+                                new_price = update_map[last_visible_code]['自訂價(可修)']
+                                old_price = str(row['自訂價(可修)'])
+                                if old_price != str(new_price) and str(new_price).strip().lower() != 'nan':
+                                    # 觸發更新：執行完整同步
+                                    if st.session_state.update_delay_sec > 0:
+                                        time.sleep(st.session_state.update_delay_sec)
+                                    
+                                    for j, r in st.session_state.stock_data.iterrows():
+                                        c_code = r['代號']
+                                        if c_code in update_map:
+                                            np = update_map[c_code]['自訂價(可修)']
+                                            nn = update_map[c_code]['戰略備註']
+                                            st.session_state.stock_data.at[j, '自訂價(可修)'] = np
+                                            
+                                            if str(r['戰略備註']) != str(nn):
+                                                base_auto = auto_notes_dict.get(c_code, "")
+                                                pure_manual = nn
+                                                if base_auto and nn.startswith(base_auto):
+                                                    pure_manual = nn[len(base_auto):].strip()
+                                                st.session_state.stock_data.at[j, '戰略備註'] = nn
+                                                st.session_state.saved_notes[c_code] = pure_manual
+                                                
+                                        new_status = recalculate_row(st.session_state.stock_data.iloc[j], points_map)
+                                        st.session_state.stock_data.at[j, '狀態'] = new_status
+                                    
+                                    trigger_rerun = True
+                            break
+
+            if trigger_rerun:
+                st.rerun()
+
         df_curr = st.session_state.stock_data
         if not df_curr.empty:
             if '_source' not in df_curr.columns:
@@ -1205,62 +1273,6 @@ with tab1:
                     st.toast(f"已更新顯示筆數，增加 {replenished_count} 檔。", icon="🔄")
                     st.rerun()
 
-        # [FIXED] 最後一列自動更新邏輯 (修正版)
-        if not edited_df.empty:
-            update_map = edited_df.set_index('代號')[['自訂價(可修)', '戰略備註']].to_dict('index')
-            # 使用 session_state.stock_data 的最後一行索引，而非 display dataframe 的
-            # 但因為 display dataframe 是 session_state 的一個 view (可能經過排序或過濾)，
-            # 我們必須鎖定「畫面上」的最後一行。
-            # 這裡 edited_df 就是畫面上的資料。
-            
-            last_visible_idx = len(edited_df) - 1
-            last_visible_code = edited_df.iloc[last_visible_idx]['代號']
-            
-            trigger_last_row_update = False
-            
-            for i, row in st.session_state.stock_data.iterrows():
-                code = row['代號']
-                if code in update_map:
-                    new_price = update_map[code]['自訂價(可修)']
-                    new_note = update_map[code]['戰略備註']
-                    
-                    old_price = str(st.session_state.stock_data.at[i, '自訂價(可修)'])
-                    old_note = str(st.session_state.stock_data.at[i, '戰略備註'])
-                    
-                    # 1. 處理自訂價更新 (靜默儲存)
-                    if old_price != str(new_price):
-                        st.session_state.stock_data.at[i, '自訂價(可修)'] = new_price
-                        # 檢查是否為「畫面上的最後一列」
-                        if code == last_visible_code and st.session_state.auto_update_last_row:
-                            trigger_last_row_update = True
-                    
-                    # 2. 處理備註記憶 (避免重複: 只存手動部分)
-                    if old_note != str(new_note):
-                        # 從新備註中移除自動產生的部分，只存手動部分
-                        base_auto = auto_notes_dict.get(code, "")
-                        pure_manual = new_note
-                        
-                        # 簡單字串比對: 若新備註以自動部分開頭，則截斷
-                        if base_auto and new_note.startswith(base_auto):
-                            pure_manual = new_note[len(base_auto):].strip()
-                        
-                        st.session_state.stock_data.at[i, '戰略備註'] = new_note
-                        st.session_state.saved_notes[code] = pure_manual
-
-            # 3. 觸發自動更新 (僅針對最後一列變動)
-            if trigger_last_row_update:
-                # 再次確認最後一列的值不是空的
-                last_row_price = str(update_map[last_visible_code]['自訂價(可修)']).strip()
-                if last_row_price and last_row_price.lower() != 'nan':
-                    if st.session_state.update_delay_sec > 0:
-                        time.sleep(st.session_state.update_delay_sec)
-                    
-                    # 重新計算所有狀態並刷新
-                    for i, row in st.session_state.stock_data.iterrows():
-                        new_status = recalculate_row(row, points_map)
-                        st.session_state.stock_data.at[i, '狀態'] = new_status
-                    st.rerun()
-
         st.markdown("---")
         
         col_btn, _ = st.columns([2, 8])
@@ -1285,8 +1297,20 @@ with tab1:
              for i, row in st.session_state.stock_data.iterrows():
                 code = row['代號']
                 if code in update_map:
-                    st.session_state.stock_data.at[i, '自訂價(可修)'] = update_map[code]['自訂價(可修)']
-                    st.session_state.stock_data.at[i, '戰略備註'] = update_map[code]['戰略備註']
+                    new_val = update_map[code]['自訂價(可修)']
+                    new_note = update_map[code]['戰略備註']
+                    st.session_state.stock_data.at[i, '自訂價(可修)'] = new_val
+                    
+                    # 補上手動備註記憶邏輯
+                    if str(row['戰略備註']) != str(new_note):
+                        base_auto = auto_notes_dict.get(code, "")
+                        pure_manual = new_note
+                        if base_auto and new_note.startswith(base_auto):
+                            pure_manual = new_note[len(base_auto):].strip()
+                        st.session_state.stock_data.at[i, '戰略備註'] = new_note
+                        st.session_state.saved_notes[code] = pure_manual
+                    else:
+                        st.session_state.stock_data.at[i, '戰略備註'] = new_note
                 
                 new_status = recalculate_row(st.session_state.stock_data.iloc[i], points_map)
                 st.session_state.stock_data.at[i, '狀態'] = new_status
