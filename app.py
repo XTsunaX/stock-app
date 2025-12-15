@@ -806,7 +806,10 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         note_parts.append(item)
     
     # [FIXED] 備註分離與記憶邏輯
+    # auto_note 是這次計算出來的 "系統自動部分"
     auto_note = "-".join(note_parts)
+    
+    # manual_note 是從 saved_notes 取出的 "手動部分"
     manual_note = st.session_state.saved_notes.get(code, "")
     
     if manual_note:
@@ -1089,7 +1092,6 @@ with tab1:
         if '_auto_note' in df_display.columns:
             auto_notes_dict = df_display.set_index('代號')['_auto_note'].to_dict()
 
-        # [REMOVED] 處置預警欄位
         input_cols = ["移除", "代號", "名稱", "戰略備註", "自訂價(可修)", "狀態", "當日漲停價", "當日跌停價", "+3%", "-3%", "收盤價", "漲跌幅", "期貨"]
         for col in input_cols:
             if col not in df_display.columns: df_display[col] = None
@@ -1205,7 +1207,8 @@ with tab1:
         # [FIXED] 最後一列自動更新邏輯 (修正版)
         if not edited_df.empty:
             update_map = edited_df.set_index('代號')[['自訂價(可修)', '戰略備註']].to_dict('index')
-            last_idx = len(edited_df) - 1
+            # 取得最後一筆顯示在畫面上的代號
+            last_visible_code = edited_df.iloc[-1]['代號']
             
             trigger_last_row_update = False
             
@@ -1221,8 +1224,8 @@ with tab1:
                     # 1. 處理自訂價更新 (靜默儲存)
                     if old_price != str(new_price):
                         st.session_state.stock_data.at[i, '自訂價(可修)'] = new_price
-                        # 只有當最後一列有變動時，標記需要觸發等待與重整
-                        if i == last_idx and st.session_state.auto_update_last_row:
+                        # 檢查是否為最後一列 (比對代號)
+                        if code == last_visible_code and st.session_state.auto_update_last_row:
                             trigger_last_row_update = True
                     
                     # 2. 處理備註記憶 (避免重複: 只存手動部分)
@@ -1240,8 +1243,9 @@ with tab1:
 
             # 3. 觸發自動更新 (僅針對最後一列變動)
             if trigger_last_row_update:
-                last_row_price = str(edited_df.iloc[last_idx]['自訂價(可修)']).strip()
-                if last_row_price: # 確保不是刪除
+                # 再次確認最後一列的值不是空的
+                last_row_price = str(update_map[last_visible_code]['自訂價(可修)']).strip()
+                if last_row_price:
                     if st.session_state.update_delay_sec > 0:
                         time.sleep(st.session_state.update_delay_sec)
                     
