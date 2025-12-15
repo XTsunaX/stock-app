@@ -144,11 +144,9 @@ if 'search_multiselect' not in st.session_state:
 if 'saved_notes' not in st.session_state:
     st.session_state.saved_notes = {}
 
-# [NEW] 快取期貨與處置詳細資料
+# [NEW] 快取期貨名單
 if 'futures_list' not in st.session_state:
     st.session_state.futures_list = set()
-if 'market_warnings' not in st.session_state:
-    st.session_state.market_warnings = {} 
 
 saved_config = load_config()
 
@@ -162,7 +160,7 @@ if 'auto_update_last_row' not in st.session_state:
     st.session_state.auto_update_last_row = saved_config.get('auto_update', True)
 
 if 'update_delay_sec' not in st.session_state:
-    st.session_state.update_delay_sec = saved_config.get('delay_sec', 1.0) # 預設改短一點
+    st.session_state.update_delay_sec = saved_config.get('delay_sec', 1.0) 
 
 # --- 側邊欄設定 ---
 with st.sidebar:
@@ -320,142 +318,6 @@ def fetch_futures_list():
     except:
         pass
     return set()
-
-# [NEW] 抓取注意股與處置股名單 (修正版)
-@st.cache_data(ttl=3600)
-def fetch_market_warnings_data():
-    warnings = {} # code -> {type, reason, period, interval}
-    
-    today = datetime.now()
-    # [Fix] 擴大抓取範圍至 45 天，確保能抓到處置期較長的公告
-    start_date = today - timedelta(days=45)
-    
-    s_str_twse = start_date.strftime("%Y%m%d")
-    e_str_twse = today.strftime("%Y%m%d")
-    
-    def tw_to_ad(s):
-        try:
-            parts = re.split(r'[/-]', s) # 支援 113/12/08 或 113-12-08
-            if len(parts) >= 3:
-                y = int(parts[0]) + 1911
-                m = int(parts[1])
-                d = int(parts[2])
-                return datetime(y, m, d)
-        except: return None
-        return None
-
-    # 1. TWSE 上市 處置股
-    try:
-        url = f"https://www.twse.com.tw/rwd/zh/announcement/punish?startDate={s_str_twse}&endDate={e_str_twse}&response=json"
-        r = requests.get(url, timeout=5)
-        data = r.json()
-        if 'data' in data:
-            for row in data['data']:
-                # row: [日期, 代號, 名稱, 累計次數, 處置期間, 處置措施, 處置原因]
-                if len(row) > 5:
-                    c = str(row[1]).strip()
-                    period_str = str(row[4]) 
-                    measure_str = str(row[5])
-                    
-                    # 檢查是否涵蓋今日
-                    p_parts = period_str.split('~') # e.g. 113/12/08~113/12/19
-                    if len(p_parts) == 2:
-                        dt_start = tw_to_ad(p_parts[0].strip())
-                        dt_end = tw_to_ad(p_parts[1].strip())
-                        
-                        if dt_start and dt_end:
-                            # 只要今天在期間內
-                            if dt_start.date() <= today.date() <= dt_end.date():
-                                interval = "人工管制"
-                                match = re.search(r'每(\d+)分鐘', measure_str)
-                                if match:
-                                    interval = f"{match.group(1)}分盤"
-                                
-                                warnings[c] = {
-                                    'type': '⛔ 處置',
-                                    'period': period_str,
-                                    'reason': str(row[6]) if len(row)>6 else "處置中",
-                                    'interval': interval,
-                                    'info': measure_str
-                                }
-    except: pass
-
-    # 2. TWSE 上市 注意股 (僅抓最近一日)
-    try:
-        url = "https://www.twse.com.tw/rwd/zh/announcement/notice?response=json"
-        r = requests.get(url, timeout=5)
-        data = r.json()
-        if 'data' in data:
-            for row in data['data']:
-                if len(row) > 3:
-                    c = str(row[1]).strip()
-                    if c not in warnings:
-                        warnings[c] = {
-                            'type': '⚠️ 注意',
-                            'reason': str(row[3]),
-                            'period': '當日',
-                            'interval': '',
-                            'info': str(row[3])
-                        }
-    except: pass
-
-    # 3. TPEX 上櫃 (CSV)
-    try:
-        # 處置 (嘗試抓最近 30 天的每一天太慢，這裡只抓最近一天的 CSV 列表)
-        # 櫃買的 URL 是固定的 "disposal_result.php"，通常只顯示「當日生效」或「歷史查詢」
-        # 歷史查詢需要 POST request，這裡簡化嘗試抓取 "當前公告"
-        # 櫃買網站結構較難一次抓取區間，改用 requests 嘗試帶參數 (但通常需要 token)
-        # 這裡改為抓取 "預警/處置股票資訊" 的靜態頁面解析可能較難
-        # 退而求其次: 抓取 "https://www.tpex.org.tw/web/bulletin/disposal/disposal_result.php?l=zh-tw&o=csv"
-        # 這通常是 "最新交易日" 的處置名單
-        url_otc_disp = "https://www.tpex.org.tw/web/bulletin/disposal/disposal_result.php?l=zh-tw&o=csv"
-        df = pd.read_csv(url_otc_disp, header=None, skiprows=5)
-        if not df.empty and df.shape[1] > 7:
-            for _, row in df.iterrows():
-                try:
-                    c = str(row[2]).strip()
-                    if c.isdigit() and len(c)==4:
-                        period_str = str(row[5])
-                        measure_str = str(row[7])
-                        reason = str(row[6])
-                        
-                        p_parts = period_str.split('~')
-                        if len(p_parts) == 2:
-                             dt_start = tw_to_ad(p_parts[0].strip())
-                             dt_end = tw_to_ad(p_parts[1].strip())
-                             
-                             if dt_start and dt_end:
-                                 if dt_start.date() <= today.date() <= dt_end.date():
-                                     interval = "人工管制"
-                                     match = re.search(r'每(\d+)分鐘', measure_str)
-                                     if match: interval = f"{match.group(1)}分盤"
-                                     
-                                     warnings[c] = {
-                                         'type': '⛔ 處置',
-                                         'period': period_str,
-                                         'reason': reason,
-                                         'interval': interval,
-                                         'info': measure_str
-                                     }
-                except: pass
-        
-        # 注意
-        url_otc_att = "https://www.tpex.org.tw/web/bulletin/attention/attention_result.php?l=zh-tw&o=csv"
-        df_att = pd.read_csv(url_otc_att, header=None, skiprows=5)
-        if not df_att.empty and df_att.shape[1] > 3:
-            for _, row in df_att.iterrows():
-                c = str(row[1]).strip()
-                if c.isdigit() and len(c)==4 and c not in warnings:
-                    warnings[c] = {
-                        'type': '⚠️ 注意',
-                        'reason': str(row[3]),
-                        'period': '當日',
-                        'interval': '',
-                        'info': str(row[3])
-                    }
-    except: pass
-    
-    return warnings
 
 def get_live_price(code):
     try:
@@ -961,25 +823,12 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     
     has_futures = "✅" if code in st.session_state.futures_list else ""
     
-    warn_status = "正常"
-    warn_info = {}
-    if code in st.session_state.market_warnings:
-        w = st.session_state.market_warnings[code]
-        if w['type'] == '⛔ 處置':
-            warn_status = f"{w['type']}"
-            if w['interval']: warn_status += f"({w['interval']})"
-        else:
-            warn_status = w['type']
-        
-        warn_info = w
-    
     return {
         "代號": code, "名稱": final_name_display, "收盤價": round(strategy_base_price, 2),
         "漲跌幅": pct_change, "期貨": has_futures, 
         "當日漲停價": limit_up_show, "當日跌停價": limit_down_show,
         "自訂價(可修)": None, "獲利目標": target_price, "防守停損": stop_price,   
-        "戰略備註": strategy_note, "_points": full_calc_points, "狀態": "",
-        "處置預警": warn_status, "_warn_info": warn_info
+        "戰略備註": strategy_note, "_points": full_calc_points, "狀態": ""
     }
 
 # ==========================================
@@ -1057,8 +906,6 @@ with tab1:
         
         if not st.session_state.futures_list:
             st.session_state.futures_list = fetch_futures_list()
-        
-        st.session_state.market_warnings = fetch_market_warnings_data()
         
         targets = []
         df_up = pd.DataFrame()
@@ -1235,7 +1082,8 @@ with tab1:
         if '_points' in df_display.columns:
             points_map = df_display.set_index('代號')['_points'].to_dict()
 
-        input_cols = ["移除", "代號", "名稱", "戰略備註", "自訂價(可修)", "狀態", "當日漲停價", "當日跌停價", "+3%", "-3%", "收盤價", "漲跌幅", "期貨", "處置預警"]
+        # [REMOVED] 處置預警欄位
+        input_cols = ["移除", "代號", "名稱", "戰略備註", "自訂價(可修)", "狀態", "當日漲停價", "當日跌停價", "+3%", "-3%", "收盤價", "漲跌幅", "期貨"]
         for col in input_cols:
             if col not in df_display.columns: df_display[col] = None
 
@@ -1281,30 +1129,12 @@ with tab1:
                 "-3%": st.column_config.TextColumn(width="small", disabled=True),
                 "狀態": st.column_config.TextColumn(width=60, disabled=True),
                 "戰略備註": st.column_config.TextColumn("戰略備註 ✏️", width=note_width_px, disabled=False),
-                "處置預警": st.column_config.TextColumn(disabled=True, width="medium"), 
             },
             hide_index=True,
             use_container_width=False,
             num_rows="fixed",
             key="main_editor"
         )
-
-        warn_data = []
-        for i, row in df_display.iterrows():
-            w_info = row.get('_warn_info')
-            if w_info and isinstance(w_info, dict):
-                warn_data.append({
-                    "代號": row['代號'],
-                    "名稱": row['名稱'].replace('🔴','').replace('🟢','').replace('⚪','').strip(),
-                    "類型": w_info.get('type',''),
-                    "原因": w_info.get('reason',''),
-                    "期間/分盤": f"{w_info.get('period','')} {w_info.get('interval','')}",
-                    "詳細內容": w_info.get('info','')
-                })
-        
-        if warn_data:
-            st.markdown("### 📋 處置與注意股詳細資訊")
-            st.dataframe(pd.DataFrame(warn_data), use_container_width=True, hide_index=True)
 
         if not edited_df.empty and "移除" in edited_df.columns:
             to_remove = edited_df[edited_df["移除"] == True]
@@ -1364,49 +1194,45 @@ with tab1:
                     st.toast(f"已更新顯示筆數，增加 {replenished_count} 檔。", icon="🔄")
                     st.rerun()
 
+        # [FIXED] 最後一列自動更新邏輯
         if not edited_df.empty:
             update_map = edited_df.set_index('代號')[['自訂價(可修)', '戰略備註']].to_dict('index')
             last_idx = len(edited_df) - 1
             
-            # 1. 靜默更新所有變更 (不觸發 rerun)
+            last_row_changed = False
+            
+            # 1. 靜默更新所有變更 (但"不"觸發rerun)
             for i, row in st.session_state.stock_data.iterrows():
                 code = row['代號']
                 if code in update_map:
                     new_price = update_map[code]['自訂價(可修)']
                     new_note = update_map[code]['戰略備註']
                     
-                    # 狀態重新計算 (但先不存回界面，除非是最後一列)
-                    st.session_state.stock_data.at[i, '自訂價(可修)'] = new_price
-                    st.session_state.stock_data.at[i, '戰略備註'] = new_note
-                    st.session_state.saved_notes[code] = new_note # 記憶備註
+                    old_price = str(st.session_state.stock_data.at[i, '自訂價(可修)'])
+                    old_note = str(st.session_state.stock_data.at[i, '戰略備註'])
+                    
+                    # 更新 Session State
+                    if old_price != str(new_price):
+                        st.session_state.stock_data.at[i, '自訂價(可修)'] = new_price
+                        # 檢查是否為最後一列
+                        if i == last_idx: last_row_changed = True
+                    
+                    if old_note != str(new_note):
+                        st.session_state.stock_data.at[i, '戰略備註'] = new_note
+                        st.session_state.saved_notes[code] = new_note
 
-            # 2. 僅針對最後一列進行 "Auto-Update" 判斷
-            if st.session_state.auto_update_last_row:
-                last_row_code = edited_df.iloc[last_idx]['代號']
+            # 2. 只有當 "啟用自動更新" 且 "最後一列價格有變動" 時才觸發耗時的更新
+            if st.session_state.auto_update_last_row and last_row_changed:
                 last_row_price = str(edited_df.iloc[last_idx]['自訂價(可修)']).strip()
-                
-                # 找出最後一列原始資料
-                original_row = st.session_state.stock_data[st.session_state.stock_data['代號'] == last_row_code]
-                if not original_row.empty:
-                    orig_status = str(original_row.iloc[0]['狀態']).strip()
+                if last_row_price: # 確保不是刪除
+                    if st.session_state.update_delay_sec > 0:
+                        time.sleep(st.session_state.update_delay_sec)
                     
-                    # 計算新狀態
-                    # 這裡需要一個暫時的 row 物件來模擬
-                    temp_row = original_row.iloc[0].copy()
-                    temp_row['自訂價(可修)'] = last_row_price
-                    new_status = recalculate_row(temp_row, points_map)
-                    
-                    # 觸發條件: 最後一列有數值 且 (狀態從無變有 或 狀態改變)
-                    # 這樣可以避免每次打字都刷新，只有在 "完成輸入" (導致狀態變化) 時才刷
-                    if last_row_price and (not orig_status or new_status != orig_status):
-                        if st.session_state.update_delay_sec > 0:
-                            time.sleep(st.session_state.update_delay_sec)
-                        
-                        # 全面更新狀態並 Rerun
-                        for i, row in st.session_state.stock_data.iterrows():
-                            new_s = recalculate_row(row, points_map)
-                            st.session_state.stock_data.at[i, '狀態'] = new_s
-                        st.rerun()
+                    # 重新計算所有狀態並刷新
+                    for i, row in st.session_state.stock_data.iterrows():
+                        new_status = recalculate_row(row, points_map)
+                        st.session_state.stock_data.at[i, '狀態'] = new_status
+                    st.rerun()
 
         st.markdown("---")
         
