@@ -700,19 +700,18 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         last_candle = hist_strat.iloc[-1] # T
         prev_candle = hist_strat.iloc[-2] # T-1
         
-        # [NEW] 盤後 (T為今日) -> 將 T 的 Open 加入戰略
-        if not is_during_trading:
-             p_open = apply_tick_rules(last_candle['Open'])
-             if limit_down_show <= p_open <= limit_up_show: 
-                 points.append({"val": p_open, "tag": ""})
+        # [NEW] 將 T 的 Open 加入戰略 (無論盤中或盤後都加入)
+        # 盤中: T = 昨日 -> 加入昨日開盤價
+        # 盤後: T = 今日 -> 加入今日開盤價
+        p_open = apply_tick_rules(last_candle['Open'])
+        if limit_down_show <= p_open <= limit_up_show: 
+             points.append({"val": p_open, "tag": ""})
 
         # 加入 T (Last Candle) 的高低 (對盤中來說這是昨天，對盤後來說這是今天)
         p_high = apply_tick_rules(last_candle['High'])
         p_low = apply_tick_rules(last_candle['Low'])
         
-        # [MODIFIED] 若是盤中模式，保留昨日高低點數值 (不移除)，但不需標註文字
-        # 只要 tag=""，點位就會進入計算並在符合條件時顯示數值
-        
+        # [MODIFIED] 標準顯示 (移除之前的昨高/昨低文字標籤，回歸 tag="")
         if limit_down_show <= p_high <= limit_up_show: points.append({"val": p_high, "tag": ""})
         if limit_down_show <= p_low <= limit_up_show: points.append({"val": p_low, "tag": ""})
 
@@ -1127,26 +1126,22 @@ with tab1:
         for c in cols_to_fmt:
             if c in df_display.columns: df_display[c] = df_display[c].apply(fmt_price)
 
-        # [MODIFIED] 使用 LaTeX 語法進行文字著色 (Red/Green)
+        # [MODIFIED] 回歸使用 Emoji (🔴 🟢 ⚪)
+        # st.data_editor 不支援純文字著色，使用 LaTeX 會顯示原始碼
         if "收盤價" in df_display.columns and "漲跌幅" in df_display.columns:
             for i in range(len(df_display)):
                 try:
                     p = float(df_display.at[i, "收盤價"])
                     chg = float(df_display.at[i, "漲跌幅"])
                     
-                    p_str = fmt_price(p)
+                    color_icon = "⚪"
+                    if chg > 0: color_icon = "🔴"
+                    elif chg < 0: color_icon = "🟢"
+                    
+                    df_display.at[i, "收盤價"] = f"{color_icon} {fmt_price(p)}"
+                    
                     chg_str = f"{chg:+.2f}%"
-
-                    if chg > 0:
-                        df_display.at[i, "收盤價"] = f"$\\textcolor{{red}}{{{p_str}}}$"
-                        df_display.at[i, "漲跌幅"] = f"$\\textcolor{{red}}{{{chg_str}}}$"
-                    elif chg < 0:
-                        df_display.at[i, "收盤價"] = f"$\\textcolor{{green}}{{{p_str}}}$"
-                        df_display.at[i, "漲跌幅"] = f"$\\textcolor{{green}}{{{chg_str}}}$"
-                    else:
-                        # 平盤維持原樣
-                        df_display.at[i, "收盤價"] = p_str
-                        df_display.at[i, "漲跌幅"] = chg_str
+                    df_display.at[i, "漲跌幅"] = f"{color_icon} {chg_str}"
                 except:
                     df_display.at[i, "收盤價"] = fmt_price(df_display.at[i, "收盤價"])
                     df_display.at[i, "漲跌幅"] = f"{float(df_display.at[i, '漲跌幅']):.2f}%"
@@ -1162,7 +1157,7 @@ with tab1:
                 "代號": st.column_config.TextColumn(disabled=True, width="small"),
                 "名稱": st.column_config.TextColumn(disabled=True, width="small"),
                 "收盤價": st.column_config.TextColumn(width="small", disabled=True),
-                "漲跌幅": st.column_config.TextColumn(disabled=True, width="small"), # 改為 TextColumn 以顯示 LaTeX
+                "漲跌幅": st.column_config.TextColumn(disabled=True, width="small"),
                 "自訂價(可修)": st.column_config.TextColumn("自訂價 ✏️", width=80),
                 "當日漲停價": st.column_config.TextColumn(width="small", disabled=True),
                 "當日跌停價": st.column_config.TextColumn(width="small", disabled=True),
