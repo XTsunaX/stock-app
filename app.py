@@ -1101,42 +1101,75 @@ with tab1:
         for col in input_cols:
              if col != "移除": df_display[col] = df_display[col].astype(str)
 
-        # [NEW] data_editor - 移除 on_change 或 key 的干擾
-        edited_df = st.data_editor(
-            df_display[input_cols],
-            column_config={
-                "移除": st.column_config.CheckboxColumn("刪除", width=40, help="勾選後刪除並自動遞補"),
-                "代號": st.column_config.TextColumn(disabled=True, width=50),
-                "名稱": st.column_config.TextColumn(disabled=True, width="small"),
-                "收盤價": st.column_config.TextColumn(width="small", disabled=True),
-                "漲跌幅": st.column_config.TextColumn(disabled=True, width="small"),
-                "期貨": st.column_config.TextColumn(disabled=True, width=40),
-                "自訂價(可修)": st.column_config.TextColumn("自訂價 ✏️", width=60),
-                "當日漲停價": st.column_config.TextColumn(width="small", disabled=True),
-                "當日跌停價": st.column_config.TextColumn(width="small", disabled=True),
-                "+3%": st.column_config.TextColumn(width="small", disabled=True),
-                "-3%": st.column_config.TextColumn(width="small", disabled=True),
-                "狀態": st.column_config.TextColumn(width=60, disabled=True),
-                "戰略備註": st.column_config.TextColumn("戰略備註 ✏️", width=note_width_px, disabled=False),
-            },
-            hide_index=True,
-            use_container_width=False,
-            num_rows="fixed",
-            key="main_editor"
-        )
+        # [CRITICAL FIX] 使用 st.form 解決跳行問題
+        with st.form("stock_entry_form"):
+            edited_df = st.data_editor(
+                df_display[input_cols],
+                column_config={
+                    "移除": st.column_config.CheckboxColumn("刪除", width=40, help="勾選後，請點擊下方的「保存並計算」按鈕來執行刪除"),
+                    "代號": st.column_config.TextColumn(disabled=True, width=50),
+                    "名稱": st.column_config.TextColumn(disabled=True, width="small"),
+                    "收盤價": st.column_config.TextColumn(width="small", disabled=True),
+                    "漲跌幅": st.column_config.TextColumn(disabled=True, width="small"),
+                    "期貨": st.column_config.TextColumn(disabled=True, width=40),
+                    "自訂價(可修)": st.column_config.TextColumn("自訂價 ✏️", width=60),
+                    "當日漲停價": st.column_config.TextColumn(width="small", disabled=True),
+                    "當日跌停價": st.column_config.TextColumn(width="small", disabled=True),
+                    "+3%": st.column_config.TextColumn(width="small", disabled=True),
+                    "-3%": st.column_config.TextColumn(width="small", disabled=True),
+                    "狀態": st.column_config.TextColumn(width=60, disabled=True),
+                    "戰略備註": st.column_config.TextColumn("戰略備註 ✏️", width=note_width_px, disabled=False),
+                },
+                hide_index=True,
+                use_container_width=False,
+                num_rows="fixed",
+                key="main_editor"
+            )
+            
+            # 表單提交按鈕
+            submitted = st.form_submit_button("💾 保存並計算狀態", type="primary", use_container_width=False)
 
-        # 處理刪除邏輯
-        if not edited_df.empty and "移除" in edited_df.columns:
-            to_remove = edited_df[edited_df["移除"] == True]
-            if not to_remove.empty:
-                remove_codes = to_remove["代號"].unique()
-                for c in remove_codes:
-                    st.session_state.ignored_stocks.add(str(c))
-                
-                st.session_state.stock_data = st.session_state.stock_data[
-                    ~st.session_state.stock_data["代號"].isin(remove_codes)
-                ]
-                st.rerun()
+        # [IMPORTANT] 只有在按下提交按鈕後才處理資料更新
+        if submitted and not edited_df.empty:
+            # 1. 處理刪除
+            if "移除" in edited_df.columns:
+                to_remove = edited_df[edited_df["移除"] == True]
+                if not to_remove.empty:
+                    remove_codes = to_remove["代號"].unique()
+                    for c in remove_codes:
+                        st.session_state.ignored_stocks.add(str(c))
+                    
+                    st.session_state.stock_data = st.session_state.stock_data[
+                        ~st.session_state.stock_data["代號"].isin(remove_codes)
+                    ]
+            
+            # 2. 處理資料更新 (自訂價 & 備註)
+            update_map = edited_df.set_index('代號')[['自訂價(可修)', '戰略備註']].to_dict('index')
+            
+            for i, row in st.session_state.stock_data.iterrows():
+                code = row['代號']
+                if code in update_map:
+                    new_price = update_map[code]['自訂價(可修)']
+                    new_note = update_map[code]['戰略備註']
+                    
+                    st.session_state.stock_data.at[i, '自訂價(可修)'] = new_price
+                    
+                    # 處理手動備註分離
+                    base_auto = auto_notes_dict.get(code, "")
+                    pure_manual = new_note
+                    if base_auto and new_note.startswith(base_auto):
+                        pure_manual = new_note[len(base_auto):].strip()
+                    
+                    st.session_state.stock_data.at[i, '戰略備註'] = new_note
+                    st.session_state.saved_notes[code] = pure_manual
+                    
+                    # 重新計算狀態 (命中/漲停/跌停)
+                    new_status = recalculate_row(st.session_state.stock_data.iloc[i], points_map)
+                    st.session_state.stock_data.at[i, '狀態'] = new_status
+            
+            save_data_cache(st.session_state.stock_data, st.session_state.ignored_stocks, st.session_state.all_candidates)
+            st.toast("資料已更新！", icon="✅")
+            st.rerun()
 
         # 處理資料遞補
         df_curr = st.session_state.stock_data
@@ -1151,7 +1184,6 @@ with tab1:
             if upload_count < limit and st.session_state.all_candidates:
                 needed = limit - upload_count
                 replenished_count = 0
-                
                 existing_codes = set(st.session_state.stock_data['代號'].astype(str))
                 
                 if needed > 0:
@@ -1184,54 +1216,9 @@ with tab1:
                 
                     if replenished_count > 0:
                         save_data_cache(st.session_state.stock_data, st.session_state.ignored_stocks, st.session_state.all_candidates)
-                        st.toast(f"已更新顯示筆數，增加 {replenished_count} 檔。", icon="🔄")
                         st.rerun()
 
-        # [IMPORTANT] 即時處理編輯內容 (不強制 rerun，避免卡頓)
-        if not edited_df.empty:
-            update_map = edited_df.set_index('代號')[['自訂價(可修)', '戰略備註']].to_dict('index')
-            
-            has_changes = False
-            for i, row in st.session_state.stock_data.iterrows():
-                code = row['代號']
-                if code in update_map:
-                    new_price = update_map[code]['自訂價(可修)']
-                    new_note = update_map[code]['戰略備註']
-                    
-                    old_price = str(st.session_state.stock_data.at[i, '自訂價(可修)'])
-                    old_note = str(st.session_state.stock_data.at[i, '戰略備註'])
-                    
-                    # 1. 更新資料
-                    if old_price != str(new_price):
-                        st.session_state.stock_data.at[i, '自訂價(可修)'] = new_price
-                        has_changes = True
-                    
-                    if old_note != str(new_note):
-                        base_auto = auto_notes_dict.get(code, "")
-                        pure_manual = new_note
-                        if base_auto and new_note.startswith(base_auto):
-                            pure_manual = new_note[len(base_auto):].strip()
-                        
-                        st.session_state.stock_data.at[i, '戰略備註'] = new_note
-                        st.session_state.saved_notes[code] = pure_manual
-                        has_changes = True
-
-                    # 2. 靜默重新計算狀態 (下次渲染時會顯示)
-                    if has_changes:
-                         new_status = recalculate_row(st.session_state.stock_data.iloc[i], points_map)
-                         st.session_state.stock_data.at[i, '狀態'] = new_status
-            
-            # 若有變更，僅儲存 Cache，不執行 Rerun
-            if has_changes:
-                save_data_cache(st.session_state.stock_data, st.session_state.ignored_stocks, st.session_state.all_candidates)
-
         st.markdown("---")
-        
-        col_btn, _ = st.columns([2, 8])
-        with col_btn:
-            # 僅提供手動更新按鈕，若使用者想強制刷新狀態
-            if st.button("⚡ 強制更新狀態", use_container_width=False, type="secondary"):
-                st.rerun()
 
 with tab2:
     st.markdown("#### 💰 當沖損益室 💰")
