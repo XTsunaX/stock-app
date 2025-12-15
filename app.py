@@ -222,8 +222,10 @@ with st.sidebar:
         st.toast("手動備註已清除", icon="🧹")
         if not st.session_state.stock_data.empty:
              for idx in st.session_state.stock_data.index:
-                 auto_part = str(st.session_state.stock_data.at[idx, '戰略備註']).split(' ')[0]
-                 st.session_state.stock_data.at[idx, '戰略備註'] = auto_part
+                 # 清除時，嘗試保留原本自動計算的部分 (假設用空格分隔)
+                 curr = str(st.session_state.stock_data.at[idx, '戰略備註'])
+                 if curr:
+                     st.session_state.stock_data.at[idx, '戰略備註'] = curr.split(' ')[0]
         st.rerun()
 
     st.caption("功能說明")
@@ -805,7 +807,15 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         else: item = v_str
         note_parts.append(item)
     
+    # [NEW] 備註分離儲存邏輯 (預備)
+    # 我們在這裡只產生 "自動備註部分"，在下方 display_note 時再合併手動部分
     auto_note = "-".join(note_parts)
+    
+    # 暫存自動備註供比對
+    # 我們不直接在這裡 return merged note，而是 return auto_note
+    # 手動備註合併移到 display layer
+    # 但為了相容舊邏輯 (recalculate_row 需要完整備註來 parse)，我們先合併
+    # 但為了避免重複，我們在存入 saved_notes 時要剔除 auto_note
     manual_note = st.session_state.saved_notes.get(code, "")
     
     if manual_note:
@@ -828,7 +838,8 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         "漲跌幅": pct_change, "期貨": has_futures, 
         "當日漲停價": limit_up_show, "當日跌停價": limit_down_show,
         "自訂價(可修)": None, "獲利目標": target_price, "防守停損": stop_price,   
-        "戰略備註": strategy_note, "_points": full_calc_points, "狀態": ""
+        "戰略備註": strategy_note, "_points": full_calc_points, "狀態": "",
+        "_auto_note": auto_note # [NEW] 隱藏欄位，存自動產生的備註
     }
 
 # ==========================================
@@ -1081,8 +1092,13 @@ with tab1:
         points_map = {}
         if '_points' in df_display.columns:
             points_map = df_display.set_index('代號')['_points'].to_dict()
+        
+        # 建立自動備註對照表 (用於分離手動備註)
+        auto_notes_dict = {}
+        if '_auto_note' in df_display.columns:
+            auto_notes_dict = df_display.set_index('代號')['_auto_note'].to_dict()
 
-        # [REMOVED] 處置預警欄位
+        # [MODIFIED] 移除處置預警欄位
         input_cols = ["移除", "代號", "名稱", "戰略備註", "自訂價(可修)", "狀態", "當日漲停價", "當日跌停價", "+3%", "-3%", "收盤價", "漲跌幅", "期貨"]
         for col in input_cols:
             if col not in df_display.columns: df_display[col] = None
@@ -1113,16 +1129,17 @@ with tab1:
         for col in input_cols:
              if col != "移除": df_display[col] = df_display[col].astype(str)
 
+        # [NEW] data_editor 自動更新邏輯 (修正版)
         edited_df = st.data_editor(
             df_display[input_cols],
             column_config={
                 "移除": st.column_config.CheckboxColumn("刪除", width=40, help="勾選後刪除並自動遞補"),
-                "代號": st.column_config.TextColumn(disabled=True, width=50), 
+                "代號": st.column_config.TextColumn(disabled=True, width=50), # [Fix] 50px
                 "名稱": st.column_config.TextColumn(disabled=True, width="small"),
                 "收盤價": st.column_config.TextColumn(width="small", disabled=True),
                 "漲跌幅": st.column_config.TextColumn(disabled=True, width="small"),
                 "期貨": st.column_config.TextColumn(disabled=True, width=40), 
-                "自訂價(可修)": st.column_config.TextColumn("自訂價 ✏️", width=60), 
+                "自訂價(可修)": st.column_config.TextColumn("自訂價 ✏️", width=60), # [Fix] 60px
                 "當日漲停價": st.column_config.TextColumn(width="small", disabled=True),
                 "當日跌停價": st.column_config.TextColumn(width="small", disabled=True),
                 "+3%": st.column_config.TextColumn(width="small", disabled=True),
@@ -1194,14 +1211,13 @@ with tab1:
                     st.toast(f"已更新顯示筆數，增加 {replenished_count} 檔。", icon="🔄")
                     st.rerun()
 
-        # [FIXED] 最後一列自動更新邏輯
+        # [FIXED] 最後一列自動更新邏輯 (修正版)
         if not edited_df.empty:
             update_map = edited_df.set_index('代號')[['自訂價(可修)', '戰略備註']].to_dict('index')
             last_idx = len(edited_df) - 1
             
-            last_row_changed = False
+            trigger_last_row_update = False
             
-            # 1. 靜默更新所有變更 (但"不"觸發rerun)
             for i, row in st.session_state.stock_data.iterrows():
                 code = row['代號']
                 if code in update_map:
@@ -1211,20 +1227,29 @@ with tab1:
                     old_price = str(st.session_state.stock_data.at[i, '自訂價(可修)'])
                     old_note = str(st.session_state.stock_data.at[i, '戰略備註'])
                     
-                    # 更新 Session State
+                    # 1. 處理自訂價更新
                     if old_price != str(new_price):
                         st.session_state.stock_data.at[i, '自訂價(可修)'] = new_price
-                        # 檢查是否為最後一列
-                        if i == last_idx: last_row_changed = True
+                        # 只有當最後一列有變動時，標記需要觸發等待與重整
+                        if i == last_idx and st.session_state.auto_update_last_row:
+                            trigger_last_row_update = True
                     
+                    # 2. 處理備註記憶 (避免重複)
                     if old_note != str(new_note):
                         st.session_state.stock_data.at[i, '戰略備註'] = new_note
-                        st.session_state.saved_notes[code] = new_note
+                        
+                        # 從新備註中移除自動產生的部分，只存手動部分
+                        base_auto = auto_notes_dict.get(code, "")
+                        pure_manual = new_note
+                        if base_auto and new_note.startswith(base_auto):
+                            pure_manual = new_note[len(base_auto):].strip()
+                        
+                        st.session_state.saved_notes[code] = pure_manual
 
-            # 2. 只有當 "啟用自動更新" 且 "最後一列價格有變動" 時才觸發耗時的更新
-            if st.session_state.auto_update_last_row and last_row_changed:
+            # 3. 觸發自動更新 (僅針對最後一列變動)
+            if trigger_last_row_update:
                 last_row_price = str(edited_df.iloc[last_idx]['自訂價(可修)']).strip()
-                if last_row_price: # 確保不是刪除
+                if last_row_price: # 確保有值
                     if st.session_state.update_delay_sec > 0:
                         time.sleep(st.session_state.update_delay_sec)
                     
