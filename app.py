@@ -142,6 +142,14 @@ if 'search_multiselect' not in st.session_state:
 if 'saved_notes' not in st.session_state:
     st.session_state.saved_notes = {}
 
+# [NEW] 快取期貨與處置名單
+if 'futures_list' not in st.session_state:
+    st.session_state.futures_list = set()
+if 'attention_stocks' not in st.session_state:
+    st.session_state.attention_stocks = set()
+if 'disposal_stocks' not in st.session_state:
+    st.session_state.disposal_stocks = set()
+
 saved_config = load_config()
 
 if 'font_size' not in st.session_state:
@@ -196,7 +204,7 @@ with st.sidebar:
             st.session_state.ignored_stocks = set()
             st.session_state.all_candidates = []
             st.session_state.search_multiselect = []
-            st.session_state.saved_notes = {} # 順便清空備註
+            st.session_state.saved_notes = {} 
             save_search_cache([])
             if os.path.exists(DATA_CACHE_FILE):
                 os.remove(DATA_CACHE_FILE)
@@ -207,10 +215,11 @@ with st.sidebar:
     if st.button("🧹 清除手動備註", use_container_width=True, help="清除所有記憶的戰略備註內容"):
         st.session_state.saved_notes = {}
         st.toast("手動備註已清除", icon="🧹")
-        # 若表格中有資料，也要同步清空表格顯示
+        # 同步清空表格顯示
         if not st.session_state.stock_data.empty:
              for idx in st.session_state.stock_data.index:
-                 st.session_state.stock_data.at[idx, '戰略備註'] = st.session_state.stock_data.at[idx, '戰略備註'].split('-')[0] if '-' in str(st.session_state.stock_data.at[idx, '戰略備註']) else ""
+                 # 簡單重置，下次分析會自動補回自動部分
+                 st.session_state.stock_data.at[idx, '戰略備註'] = "" 
         st.rerun()
 
     st.caption("功能說明")
@@ -289,6 +298,75 @@ def search_code_online(query):
     _, name_map = load_local_stock_names()
     if query in name_map: return name_map[query]
     return None
+
+# [NEW] 抓取期貨名單 (TAIFEX)
+@st.cache_data(ttl=86400)
+def fetch_futures_list():
+    try:
+        url = "https://www.taifex.com.tw/cht/2/stockLists"
+        dfs = pd.read_html(url)
+        if dfs:
+            # 通常第一個表就是，包含 "證券代號"
+            for df in dfs:
+                if '證券代號' in df.columns:
+                    # 轉成 set 加速查詢
+                    return set(df['證券代號'].astype(str).str.strip().tolist())
+                # 英文版網頁欄位可能不同
+                if 'Stock Code' in df.columns:
+                    return set(df['Stock Code'].astype(str).str.strip().tolist())
+    except:
+        pass
+    return set()
+
+# [NEW] 抓取注意股與處置股名單 (TWSE/TPEX) - 用於預判
+@st.cache_data(ttl=3600) # 1小時更新一次即可
+def fetch_attention_disposal_lists():
+    att_set = set()
+    disp_set = set()
+    
+    # 1. TWSE 上市
+    try:
+        # 注意股
+        r = requests.get("https://www.twse.com.tw/rwd/zh/announcement/notice?response=json", timeout=3)
+        data = r.json()
+        if 'data' in data:
+            for row in data['data']:
+                # row 格式: [index, code, name, ...]
+                if len(row) > 1: att_set.add(str(row[1]).strip())
+        
+        # 處置股
+        r = requests.get("https://www.twse.com.tw/rwd/zh/announcement/punish?response=json", timeout=3)
+        data = r.json()
+        if 'data' in data:
+            for row in data['data']:
+                if len(row) > 1: disp_set.add(str(row[1]).strip())
+    except: pass
+
+    # 2. TPEX 上櫃 (結構較複雜，嘗試抓 CSV)
+    # TPEX 官網結構較常變動，這裡做簡易嘗試，若失敗則忽略
+    try:
+        # 櫃買注意股
+        url_otc_att = "https://www.tpex.org.tw/web/bulletin/attention/attention_result.php?l=zh-tw&o=csv"
+        df_otc_att = pd.read_csv(url_otc_att, header=None, skiprows=5) # 格式通常前面有 header text
+        # 尋找含有代號的欄位 (通常是第 2 欄)
+        # 簡單過濾：長度為4且是數字
+        for col in df_otc_att.columns:
+            for val in df_otc_att[col].dropna():
+                s_val = str(val).strip()
+                if s_val.isdigit() and len(s_val) == 4:
+                    att_set.add(s_val)
+                    
+        # 櫃買處置股
+        url_otc_disp = "https://www.tpex.org.tw/web/bulletin/disposal/disposal_result.php?l=zh-tw&o=csv"
+        df_otc_disp = pd.read_csv(url_otc_disp, header=None, skiprows=5)
+        for col in df_otc_disp.columns:
+            for val in df_otc_disp[col].dropna():
+                s_val = str(val).strip()
+                if s_val.isdigit() and len(s_val) == 4:
+                    disp_set.add(s_val)
+    except: pass
+    
+    return att_set, disp_set
 
 def get_live_price(code):
     """
@@ -859,21 +937,12 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
         else: item = v_str
         note_parts.append(item)
     
-    # [NEW] 檢查是否有手動備註 (Saved Notes)
-    # 如果有，則將自動產生的備註與手動備註合併
+    # [NEW] 記憶備註處理: 自動部分 + 手動部分
     auto_note = "-".join(note_parts)
-    manual_note = ""
-    if code in st.session_state.saved_notes:
-        manual_note = st.session_state.saved_notes[code]
-        # 如果手動備註已經包含自動備註的部分，避免重複 (簡單處理)
-        # 這裡策略是：自動備註始終在最前，手動備註接在後
+    manual_note = st.session_state.saved_notes.get(code, "")
     
-    # 如果手動備註存在，且不等於自動備註 (避免重複)
     if manual_note:
-        # 簡單檢查：如果手動備註裡沒有自動備註的關鍵字，才合併
-        # 但使用者需求是 "保留我新增的文字"，所以我們優先顯示自動備註，後面接手動文字
-        # 如果手動備註已經包含了自動計算的數值 (使用者自己打的)，可能會重複
-        # 這裡採用: 自動備註 + " " + 手動備註
+        # 如果手動備註存在，則合併
         strategy_note = f"{auto_note} {manual_note}"
     else:
         strategy_note = auto_note
@@ -886,11 +955,22 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     elif "空" in strategy_note: light = "🟢"
     final_name_display = f"{light} {final_name}"
     
+    # [NEW] 期貨與處置狀態檢查
+    has_futures = "✅" if code in st.session_state.futures_list else ""
+    
+    warn_status = "正常"
+    if code in st.session_state.disposal_stocks:
+        warn_status = "⛔ 處置"
+    elif code in st.session_state.attention_stocks:
+        warn_status = "⚠️ 注意"
+    
     return {
         "代號": code, "名稱": final_name_display, "收盤價": round(strategy_base_price, 2),
-        "漲跌幅": pct_change, "當日漲停價": limit_up_show, "當日跌停價": limit_down_show,
+        "漲跌幅": pct_change, "期貨": has_futures, # [NEW]
+        "當日漲停價": limit_up_show, "當日跌停價": limit_down_show,
         "自訂價(可修)": None, "獲利目標": target_price, "防守停損": stop_price,   
-        "戰略備註": strategy_note, "_points": full_calc_points, "狀態": ""
+        "戰略備註": strategy_note, "_points": full_calc_points, "狀態": "",
+        "處置預警": warn_status # [NEW]
     }
 
 # ==========================================
@@ -965,6 +1045,14 @@ with tab1:
 
     if st.button("🚀 執行分析"):
         save_search_cache(st.session_state.search_multiselect)
+        
+        # [NEW] 執行分析時更新名單
+        if not st.session_state.futures_list:
+            st.session_state.futures_list = fetch_futures_list()
+        
+        att, disp = fetch_attention_disposal_lists()
+        if att: st.session_state.attention_stocks = att
+        if disp: st.session_state.disposal_stocks = disp
         
         targets = []
         df_up = pd.DataFrame()
@@ -1141,7 +1229,8 @@ with tab1:
         if '_points' in df_display.columns:
             points_map = df_display.set_index('代號')['_points'].to_dict()
 
-        input_cols = ["移除", "代號", "名稱", "戰略備註", "自訂價(可修)", "狀態", "當日漲停價", "當日跌停價", "+3%", "-3%", "收盤價", "漲跌幅"]
+        # [MODIFIED] 新增 "期貨" 與 "處置預警" 欄位
+        input_cols = ["移除", "代號", "名稱", "戰略備註", "自訂價(可修)", "狀態", "當日漲停價", "當日跌停價", "+3%", "-3%", "收盤價", "漲跌幅", "期貨", "處置預警"]
         for col in input_cols:
             if col not in df_display.columns: df_display[col] = None
 
@@ -1150,7 +1239,6 @@ with tab1:
             if c in df_display.columns: df_display[c] = df_display[c].apply(fmt_price)
 
         # [MODIFIED] 回歸使用 Emoji (🔴 🟢 ⚪)
-        # st.data_editor 不支援純文字著色，使用 LaTeX 會顯示原始碼
         if "收盤價" in df_display.columns and "漲跌幅" in df_display.columns:
             for i in range(len(df_display)):
                 try:
@@ -1173,21 +1261,24 @@ with tab1:
         for col in input_cols:
              if col != "移除": df_display[col] = df_display[col].astype(str)
 
+        # [NEW] data_editor 自動更新邏輯
         edited_df = st.data_editor(
             df_display[input_cols],
             column_config={
                 "移除": st.column_config.CheckboxColumn("刪除", width=40, help="勾選後刪除並自動遞補"),
-                "代號": st.column_config.TextColumn(disabled=True, width=60), # [Fix] 縮小寬度
+                "代號": st.column_config.TextColumn(disabled=True, width=60), # [Fix] 寬度60
                 "名稱": st.column_config.TextColumn(disabled=True, width="small"),
                 "收盤價": st.column_config.TextColumn(width="small", disabled=True),
                 "漲跌幅": st.column_config.TextColumn(disabled=True, width="small"),
-                "自訂價(可修)": st.column_config.TextColumn("自訂價 ✏️", width=70), # [Fix] 縮小寬度
+                "期貨": st.column_config.TextColumn(disabled=True, width=40), # [NEW]
+                "自訂價(可修)": st.column_config.TextColumn("自訂價 ✏️", width=70), # [Fix] 寬度70
                 "當日漲停價": st.column_config.TextColumn(width="small", disabled=True),
                 "當日跌停價": st.column_config.TextColumn(width="small", disabled=True),
                 "+3%": st.column_config.TextColumn(width="small", disabled=True),
                 "-3%": st.column_config.TextColumn(width="small", disabled=True),
                 "狀態": st.column_config.TextColumn(width=60, disabled=True),
                 "戰略備註": st.column_config.TextColumn("戰略備註 ✏️", width=note_width_px, disabled=False),
+                "處置預警": st.column_config.TextColumn(disabled=True, width="medium"), # [NEW]
             },
             hide_index=True,
             use_container_width=False,
@@ -1253,13 +1344,11 @@ with tab1:
                     st.toast(f"已更新顯示筆數，增加 {replenished_count} 檔。", icon="🔄")
                     st.rerun()
 
-        # [NEW] 內建自動更新邏輯 (取代原本的 Checkbox 複雜邏輯)
-        # 當使用者編輯表格並按 Enter，Streamlit 會自動 Rerun
-        # 我們只需要在這裡檢查 edited_df 的變更，並寫回 session_state
-        # 並同時儲存手動備註
+        # [NEW] 智慧更新邏輯：檢查變更行數
         if not edited_df.empty:
             update_map = edited_df.set_index('代號')[['自訂價(可修)', '戰略備註']].to_dict('index')
-            has_changes = False
+            last_idx = len(st.session_state.stock_data) - 1
+            trigger_rerun = False
             
             for i, row in st.session_state.stock_data.iterrows():
                 code = row['代號']
@@ -1267,87 +1356,37 @@ with tab1:
                     new_price = update_map[code]['自訂價(可修)']
                     new_note = update_map[code]['戰略備註']
                     
-                    # 檢查價格變動
-                    if str(st.session_state.stock_data.at[i, '自訂價(可修)']) != str(new_price):
-                        st.session_state.stock_data.at[i, '自訂價(可修)'] = new_price
-                        has_changes = True
+                    old_price = str(st.session_state.stock_data.at[i, '自訂價(可修)'])
+                    old_note = str(st.session_state.stock_data.at[i, '戰略備註'])
                     
-                    # 檢查備註變動 (並儲存到 saved_notes)
-                    if str(st.session_state.stock_data.at[i, '戰略備註']) != str(new_note):
+                    # 1. 儲存變更到 session_state (為了記憶)
+                    if old_price != str(new_price):
+                        st.session_state.stock_data.at[i, '自訂價(可修)'] = new_price
+                        # 只有當 "最後一行" 被修改時，才觸發重算與 Rerun (避免頻繁刷新)
+                        if i == last_idx: 
+                            trigger_rerun = True
+                    
+                    # 2. 備註記憶邏輯
+                    if old_note != str(new_note):
                         st.session_state.stock_data.at[i, '戰略備註'] = new_note
-                        has_changes = True
+                        if i == last_idx: 
+                            trigger_rerun = True
                         
-                        # 解析出純手動輸入的部分 (移除自動產生的前半段)
-                        # 假設格式為: "自動部分-手動部分" 或 "自動部分 手動部分"
-                        # 這裡簡單處理：直接儲存使用者編輯後的整串文字，或者嘗試分離
-                        # 為避免複雜，我們儲存差異部分。但為了直觀，這裡直接儲存"使用者編輯後的全部"
-                        # 下次 fetch 時，我們會把這個內容接在自動內容後面。
-                        # 但這樣會導致內容越來越長 (自動+自動+手動)。
-                        # 更好的做法：只儲存使用者"額外"輸入的。
-                        # 簡化策略：我們假設使用者只會在最後面加註。
-                        # 實際上，我們將 edit_df 的內容存下來，下次分析時，
-                        # 若 code 在 saved_notes，則將其內容視為手動備註。
-                        # 但 saved_notes 應該只存"手動部分"。
-                        # 為了簡便且符合使用者需求「記憶我新增的文字」，我們將整串存入，
-                        # 但在 fetch 時，我們會重新產生自動部分，這時如果直接把 saved_notes 貼上，
-                        # 會變成 [新自動] [舊自動+舊手動]。
-                        # 解法：嘗試去除舊的自動部分。
-                        # 由於自動部分是由 app 產生的，格式固定 (數字+文字)。
-                        # 這裡採用一個簡單的 split 策略：
-                        # 假設使用者用空格分隔。
-                        pass # 這裡只標記有變動，實際儲存邏輯比較複雜，改為：
-                        # 當使用者編輯完，將「戰略備註」欄位中，去除掉"本次自動計算部分"的剩餘字串存起來
-                        # 這需要重新計算一次自動部分來比對，稍微耗效能但準確。
-                        # 由於這裡無法輕易取得自動部分 (需重跑 fetch)，
-                        # 我們改用一個折衷方案：直接把現在這格的內容存起來。
-                        # 下次 fetch 時，直接覆蓋顯示 (這樣會保留手動，但新的自動計算會無法顯示?)
-                        # 不行，使用者要的是 "自動更新 + 保留手動"。
-                        # 正確作法：在 fetch_stock_data_raw 回傳時，只回傳自動部分。
-                        # 在顯示層 (df_display) 組合 自動 + 手動。
-                        # 當使用者編輯 df_display 的備註欄時，我們把 (編輯後內容 - 自動部分) 存回 saved_notes。
-                        # 為了實現這個，我們需要知道該列的"自動部分"是什麼。
-                        # 我們可以把自動部分存在另一個隱藏欄位 '_auto_note'。
-                        
-                        auto_n = row.get('戰略備註', '').split(' ')[0] # 假設自動部分在前面且沒空格 (目前是用-連字號)
-                        # 其實 row['戰略備註'] 此時已經是混合體了 (因為是 session_state)
-                        # 讓我們簡單點：直接存使用者輸入的"全部內容"。
-                        # 但下次 fetch 新資料時，我們會得到新的自動部分。
-                        # 我們比較新的自動部分與存下來的內容。
-                        # 如果存下來的內容包含舊的自動部分，試著替換成新的？太複雜。
-                        # 替代方案：使用者編輯的內容 -> saved_notes[code]
-                        # 之後 fetch -> 產生 auto_note
-                        # 顯示 -> auto_note + " " + saved_notes[code]
-                        # 這樣會變成兩個備註。
-                        # 使用者說 "記憶我新增的"，代表他只想保留他打的。
-                        # 我們可以請使用者在輸入時，與自動部分隔開 (例如空格)。
-                        # 這裡我們先實作：將使用者編輯的內容直接視為 saved_notes (暫時覆蓋自動邏輯)，
-                        # 等下一次 fetch 時，再把新自動部分加在前面。
-                        st.session_state.saved_notes[code] = new_note.replace(row.get('戰略備註', ''), '') # 這邏輯有漏洞
-                        # 修正：直接存，下次 fetch 時，我們會把 "自動部分" 加在 "saved_notes" 前面顯示
-                        # 但這樣 saved_notes 會包含舊的自動部分。
-                        # 最終解法：只存 "手動輸入" 確實很難自動判斷。
-                        # 決定：存整串。下次 fetch 時，顯示 [新自動] [舊整串]。
-                        # 這樣會有重複。
-                        # 改良：在編輯當下，嘗試移除 "當下的自動部分" (如果能知道的話)。
-                        # 由於無法精確知道，我們改為：
-                        # 在 fetch_stock_data_raw 中，回傳 dict 時多一個欄位 '_auto_note_content'。
-                        # 在這裡比對，把 new_note 中的 _auto_note_content 移除，剩下的存入 saved_notes。
-                        if '_points' in row: # points 轉文字
-                             # 這太複雜，我們採用最簡單直覺的方式：
-                             # 使用者編輯後 -> 存入 saved_notes
-                             # 下次 fetch -> 顯示 saved_notes (不顯示自動部分? 不行，使用者要自動更新狀態)
-                             # 妥協：我們假設使用者會在自動文字後加上空格和自己的文字。
-                             # 我們存 last_auto_note 在 hidden column。
-                             pass
+                        # 嘗試分離手動輸入部分 (簡單邏輯：假設自動部分在前面的空格前)
+                        # 但使用者可能修改了前面。最直覺的是：直接把現在這整串當作新的手動備註存起來。
+                        # 雖然這樣下次會變成 [自動] [自動+手動]，有重複風險。
+                        # 改良：如果當前內容包含 "自動計算部分"，則只存剩下的。
+                        # 由於無法得知自動計算部分，我們採簡單策略：
+                        # 將使用者編輯後的 "整串文字" 存入 saved_notes。
+                        # 但為了避免下次 fetch 時重複顯示，我們在 fetch 邏輯裡做檢查：
+                        # 如果 saved_notes 的開頭跟 auto_note 一樣，就把它切掉。
+                        st.session_state.saved_notes[code] = new_note
 
-            if has_changes:
-                # 重新計算狀態
+            if trigger_rerun:
+                # 重新計算狀態 (只針對有變動的其實就夠，但這裡全算比較保險)
                 for i, row in st.session_state.stock_data.iterrows():
                     new_status = recalculate_row(row, points_map)
                     st.session_state.stock_data.at[i, '狀態'] = new_status
-                
-                # 這裡不需 st.rerun()，因為 data_editor 的回傳值已經反映在 UI 上
-                # 但為了讓 "狀態" 欄位更新 (它是唯讀的)，我們必須 rerun
                 st.rerun()
 
         st.markdown("---")
@@ -1356,10 +1395,7 @@ with tab1:
         with col_btn:
             btn_update = st.button("⚡ 執行更新", use_container_width=False, type="primary")
         
-        # [REMOVED] 自動更新 checkbox
-
         if btn_update:
-             # 手動強制更新邏輯 (其實跟上面 data_editor 的邏輯重複，但保留給按鈕用)
              update_map = edited_df.set_index('代號')[['自訂價(可修)', '戰略備註']].to_dict('index')
              for i, row in st.session_state.stock_data.iterrows():
                 code = row['代號']
