@@ -210,7 +210,7 @@ with st.sidebar:
     hide_non_stock = st.checkbox("隱藏非個股 (ETF/權證/債券)", value=True)
     
     # 近3日高低點選項
-    show_3d_hilo = st.checkbox("近3日高低點 (戰略備註)", value=False, help="勾選後，將於戰略備註中加入前天、昨天、今天的最高與最低價 (前高/昨高/今高...)")
+    show_3d_hilo = st.checkbox("近3日高低點 (戰略備註)", value=False, help="勾選後，將於戰略備註中加入前天、昨天、今天的最高與最低價 (僅顯示數值)")
     
     st.markdown("---")
     
@@ -251,7 +251,8 @@ with st.sidebar:
     else:
         st.write("🚫 目前無忽略股票")
     
-    col_restore, col_clear = st.columns([1, 1])
+    # [修正] 側邊欄按鈕避免換行，使用 gap="small"
+    col_restore, col_clear = st.columns([1, 1], gap="small")
     with col_restore:
         if st.button("♻️ 全部復原", use_container_width=True):
             st.session_state.ignored_stocks.clear()
@@ -511,7 +512,9 @@ def recalculate_row(row, points_map):
         return status
     except: return status
 
-# [NEW] 戰略備註生成器 (獨立邏輯，支援動態3H/3L整合排序)
+# [修正] 戰略備註生成器：
+# 1. 調整優先順序，確保 "多"/"空" 被正確判定 (修復燈號)
+# 2. 針對近3日高低點，只顯示數值 (修復文字)
 def generate_note_from_points(points, manual_note, show_3d):
     display_candidates = []
     
@@ -520,15 +523,11 @@ def generate_note_from_points(points, manual_note, show_3d):
     
     for p in points:
         t = p.get('tag', '')
-        # 如果是 3日相關標籤且開關未開啟，則不顯示
         if t in target_tags and not show_3d:
             continue
-        
         if p['val'] <= 0: continue
-        
         display_candidates.append(p)
         
-    # 關鍵：依價格由小到大排序，讓 3H/3L 自動插入正確位置
     display_candidates.sort(key=lambda x: x['val'])
     
     note_parts = []
@@ -541,34 +540,41 @@ def generate_note_from_points(points, manual_note, show_3d):
         g_list = list(group)
         tags = [x['tag'] for x in g_list if x['tag']]
         
-        # 標籤優先級合併邏輯
+        # 標籤優先級合併邏輯 (修正：提高 "多/空" 的優先級，以利燈號判斷)
         final_tag = ""
-        # 狀態類優先
+        
+        # 1. 狀態類 (最優先)
         if "漲停高" in tags: final_tag = "漲停高"
         elif "跌停低" in tags: final_tag = "跌停低" 
         elif "漲停" in tags: final_tag = "漲停"
         elif "跌停" in tags: final_tag = "跌停"
-        else:
-            # 區間類
-            if "高" in tags: final_tag = "高"
-            elif "低" in tags: final_tag = "低"
-            # 日K類 (優先顯示較近期的)
-            elif "今高" in tags: final_tag = "今高"
-            elif "今低" in tags: final_tag = "今低"
-            elif "昨高" in tags: final_tag = "昨高"
-            elif "昨低" in tags: final_tag = "昨低"
-            elif "前高" in tags: final_tag = "前高"
-            elif "前低" in tags: final_tag = "前低"
-            # 均線類
-            elif "多" in tags: final_tag = "多"
-            elif "空" in tags: final_tag = "空"
-            elif "平" in tags: final_tag = "平"
+        
+        # 2. 趨勢類 (次優先，確保燈號顏色正確)
+        elif "多" in tags: final_tag = "多"
+        elif "空" in tags: final_tag = "空"
+        elif "平" in tags: final_tag = "平"
+
+        # 3. 區間類
+        elif "高" in tags: final_tag = "高"
+        elif "低" in tags: final_tag = "低"
+        
+        # 4. 日K類 (近3日)
+        elif "今高" in tags: final_tag = "今高"
+        elif "今低" in tags: final_tag = "今低"
+        elif "昨高" in tags: final_tag = "昨高"
+        elif "昨低" in tags: final_tag = "昨低"
+        elif "前高" in tags: final_tag = "前高"
+        elif "前低" in tags: final_tag = "前低"
         
         v_str = fmt_price(val)
-        known_tags = ["漲停", "漲停高", "跌停", "跌停低", "高", "低", "前高", "前低", "昨高", "昨低", "今高", "今低"]
+        known_status = ["漲停", "漲停高", "跌停", "跌停低", "高", "低", "多", "空", "平"]
+        threed_tags = ["前高", "前低", "昨高", "昨低", "今高", "今低"]
         
-        if final_tag in known_tags: 
+        if final_tag in known_status: 
             item = f"{final_tag}{v_str}"
+        elif final_tag in threed_tags:
+            # 修正：如果是近3日高低點，只顯示數值 (不加文字)
+            item = v_str
         elif final_tag: 
             item = f"{v_str}{final_tag}"
         else: 
@@ -707,17 +713,9 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     
     points = []
     
-    # [NEW] 近3日高低點 (前天/昨天/今天)
-    # 取最後3筆資料
     recent_k = hist_strat.tail(3)
-    # 根據位置給予標籤 (由新到舊反向處理方便判斷)
-    # recent_k 的最後一筆是 "今天" (或最近交易日)
-    
     days_map = {0: "今", 1: "昨", 2: "前"}
-    
-    # 轉換為 list 方便以 index 存取
     recent_records = recent_k.to_dict('records')
-    # 反轉，index 0 為最新(今天)
     recent_records.reverse()
     
     for idx, row in enumerate(recent_records):
@@ -725,11 +723,8 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
             prefix = days_map[idx]
             h_val = apply_tick_rules(row['High'])
             l_val = apply_tick_rules(row['Low'])
-            
-            if h_val > 0:
-                points.append({"val": h_val, "tag": f"{prefix}高"})
-            if l_val > 0:
-                points.append({"val": l_val, "tag": f"{prefix}低"})
+            if h_val > 0: points.append({"val": h_val, "tag": f"{prefix}高"})
+            if l_val > 0: points.append({"val": l_val, "tag": f"{prefix}低"})
 
     if len(hist_strat) >= 5:
         last_5_closes = hist_strat['Close'].tail(5).values
@@ -810,15 +805,12 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None):
     if show_plus_3: points.append({"val": target_price, "tag": ""})
     if show_minus_3: points.append({"val": stop_price, "tag": ""})
         
-    # 這裡不過濾 tag，保留完整資料
     full_calc_points = []
-    # 定義 3日 相關標籤
     threed_tags = ['前高', '前低', '昨高', '昨低', '今高', '今低']
     
     for p in points:
         v = float(f"{p['val']:.2f}")
         is_force = p.get('force', False)
-        # 如果是 3日標籤，無條件加入 (顯示與否交給 UI checkbox 決定)
         if is_force or p.get('tag') in threed_tags or (limit_down_show <= v <= limit_up_show):
              full_calc_points.append(p) 
     
@@ -913,9 +905,9 @@ with tab1:
             placeholder="輸入 2330 或 台積電..."
         )
 
-    # [修正] 按鈕區塊調整: 改為依照文字長度縮放 (use_container_width=False)
-    # 透過 columns 的權重分配，讓它們靠左且不會過寬，按鈕會自然貼合文字大小
-    c_run, c_save, c_clear, c_space = st.columns([1.2, 0.8, 1.5, 6])
+    # [修正] 按鈕區塊調整: 並排顯示，gap="small"
+    # c_space 用於右側留白，前三欄分配給按鈕
+    c_run, c_save, c_clear, c_space = st.columns([1, 0.8, 1.2, 7], gap="small")
     
     with c_run:
         btn_run = st.button("🚀 執行分析", use_container_width=False)
@@ -933,7 +925,6 @@ with tab1:
         st.toast("手動備註已清除", icon="🧹")
         if not st.session_state.stock_data.empty:
              for idx in st.session_state.stock_data.index:
-                 # 清除時保留 _auto_note
                  if '_auto_note' in st.session_state.stock_data.columns:
                      st.session_state.stock_data.at[idx, '戰略備註'] = st.session_state.stock_data.at[idx, '_auto_note']
         st.rerun()
@@ -1091,7 +1082,6 @@ with tab1:
         
         df_display = df_all.reset_index(drop=True)
         
-        # [NEW] 根據 Checkbox 動態重新生成「戰略備註」
         for i, row in df_display.iterrows():
             points = row.get('_points', [])
             manual = st.session_state.saved_notes.get(row['代號'], "")
