@@ -762,7 +762,14 @@ with tab1:
             st.selectbox("📜 歷史紀錄", options=st.session_state.url_history if st.session_state.url_history else ["(無紀錄)"], key="history_selected", index=None, on_change=lambda: setattr(st.session_state, 'cloud_url_input', st.session_state.history_selected), label_visibility="collapsed")
             st.text_input("輸入連結", key="cloud_url_input", placeholder="https://...")
         
-        search_selection = st.multiselect("🔍 快速查詢", options=stock_options, key="search_multiselect", on_change=lambda: save_search_cache(st.session_state.search_multiselect), placeholder="輸入 2330 或 台積電..."
+        # [修正] 上一版漏掉括號處
+        search_selection = st.multiselect(
+            "🔍 快速查詢", 
+            options=stock_options, 
+            key="search_multiselect", 
+            on_change=lambda: save_search_cache(st.session_state.search_multiselect), 
+            placeholder="輸入 2330 或 台積電..."
+        )
 
     if st.button("🚀 執行分析"):
         if not st.session_state.futures_list: st.session_state.futures_list = fetch_futures_list()
@@ -954,7 +961,6 @@ with tab2:
     with c4: 
         min_fee = st.number_input("最低手續費 (元)", value=20, step=1)
     with c5: 
-        # [修正] 使用關鍵字參數確保 min/max/value 順序正確
         tick_count = st.number_input("顯示檔數 (檔)", min_value=1, max_value=50, value=5, step=1)
     
     direction = st.radio("交易方向", ["當沖多 (先買後賣)", "當沖空 (先賣後買)"], horizontal=True)
