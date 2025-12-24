@@ -929,11 +929,11 @@ with tab1:
     c_run, c_save, c_clear = st.columns([2, 1, 1], gap="small")
     
     with c_run:
-        btn_run = st.button("🚀 執行分析", use_container_width="small")
+        btn_run = st.button("🚀 執行分析", use_container_width=True)
     with c_save:
-        btn_save_data = st.button("💾 儲存", use_container_width="small", help="強制儲存當前資料到快取")
+        btn_save_data = st.button("💾 儲存", use_container_width=True, help="強制儲存當前資料到快取")
     with c_clear:
-        btn_clear_notes = st.button("🧹 清除手動備註", use_container_width="small", help="清除所有記憶的戰略備註內容")
+        btn_clear_notes = st.button("🧹 清除手動備註", use_container_width=True, help="清除所有記憶的戰略備註內容")
 
     if btn_save_data:
         save_data_cache(st.session_state.stock_data, st.session_state.ignored_stocks, st.session_state.all_candidates)
