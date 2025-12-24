@@ -178,7 +178,6 @@ with st.sidebar:
     
     hide_non_stock = st.checkbox("隱藏非個股 (ETF/權證/債券)", value=True)
     
-    # [修正 3] 側邊欄新增選項
     include_3d_hl = st.checkbox("戰略備註包含近三日高低點", value=False, help="在備註中加入最近三個交易日的最高點與最低點參考")
     
     st.markdown("---")
@@ -201,7 +200,6 @@ with st.sidebar:
     st.markdown("### 資料管理")
     st.write(f"🚫 已忽略 **{len(st.session_state.ignored_stocks)}** 檔")
     
-    # [修正 2] 忽略名單管理介面
     if st.session_state.ignored_stocks:
         ignored_options = sorted(list(st.session_state.ignored_stocks))
         stocks_to_restore = st.multiselect("選取以復原股票:", options=ignored_options, placeholder="選擇代號...")
@@ -547,7 +545,6 @@ def recalculate_row(row, points_map):
         return status
     except: return status
 
-# [修正 3] 參數增加 include_3d_hl
 def fetch_stock_data_raw(code, name_hint="", extra_data=None, include_3d_hl=False):
     code = str(code).strip()
     hist = pd.DataFrame()
@@ -645,7 +642,6 @@ def fetch_stock_data_raw(code, name_hint="", extra_data=None, include_3d_hl=Fals
 
     points = []
     
-    # [修正 3] 加入近三日高低點邏輯
     if include_3d_hl and len(hist_strat) >= 1:
         last_3_days = hist_strat.tail(3)
         h3_raw = last_3_days['High'].max()
@@ -766,7 +762,7 @@ with tab1:
             st.selectbox("📜 歷史紀錄", options=st.session_state.url_history if st.session_state.url_history else ["(無紀錄)"], key="history_selected", index=None, on_change=lambda: setattr(st.session_state, 'cloud_url_input', st.session_state.history_selected), label_visibility="collapsed")
             st.text_input("輸入連結", key="cloud_url_input", placeholder="https://...")
         
-        search_selection = st.multiselect("🔍 快速查詢", options=stock_options, key="search_multiselect", on_change=lambda: save_search_cache(st.session_state.search_multiselect), placeholder="輸入 2330 或 台積電...")
+        search_selection = st.multiselect("🔍 快速查詢", options=stock_options, key="search_multiselect", on_change=lambda: save_search_cache(st.session_state.search_multiselect), placeholder="輸入 2330 或 台積電..."
 
     if st.button("🚀 執行分析"):
         if not st.session_state.futures_list: st.session_state.futures_list = fetch_futures_list()
@@ -822,7 +818,6 @@ with tab1:
             status_text.text(f"正在分析: {code} {name} ...")
             if code in st.session_state.ignored_stocks: continue
             time.sleep(0.05)
-            # [修正 3] 執行分析時傳入選項
             data = fetch_stock_data_raw(code, name, extra, include_3d_hl=include_3d_hl)
             if not data and code in old_data_backup: data = old_data_backup[code]
             if data:
@@ -875,7 +870,6 @@ with tab1:
             hide_index=True, key="main_editor"
         )
         
-        # [修正 1] 新增儲存與刪除備註按鈕
         col_btn1, col_btn2, col_btn3, _ = st.columns([1.5, 1.2, 1.2, 6.1])
         with col_btn1:
             btn_update = st.button("⚡ 執行更新", type="primary", use_container_width=True)
@@ -884,10 +878,8 @@ with tab1:
         with col_btn3:
             btn_del_notes = st.button("🗑️ 刪除備註", use_container_width=True, help="清空所有手動新增的備註文字")
 
-        # 邏輯處理
         trigger_rerun = False
         if not edited_df.empty:
-            # 處理刪除
             to_remove = edited_df[edited_df["移除"] == True]
             if not to_remove.empty:
                 for c in to_remove["代號"].unique(): st.session_state.ignored_stocks.add(str(c))
@@ -902,7 +894,6 @@ with tab1:
                 if code in update_map:
                     new_val, new_note = update_map[code]['自訂價(可修)'], update_map[code]['戰略備註']
                     st.session_state.stock_data.at[i, '自訂價(可修)'] = new_val
-                    # 提取手動部分
                     auto_part = auto_notes_dict.get(code, "")
                     manual_part = new_note[len(auto_part):].strip() if auto_part and new_note.startswith(auto_part) else new_note
                     st.session_state.saved_notes[code] = manual_part
@@ -923,7 +914,6 @@ with tab1:
 
         if trigger_rerun: st.rerun()
 
-        # 自動遞補邏輯
         upload_count = len(st.session_state.stock_data[st.session_state.stock_data['_source'] == 'upload']) if not st.session_state.stock_data.empty else 0
         if upload_count < st.session_state.limit_rows and st.session_state.all_candidates:
             needed = st.session_state.limit_rows - upload_count; replenished = 0
@@ -931,7 +921,6 @@ with tab1:
             for cand in st.session_state.all_candidates:
                 c_code = str(cand[0])
                 if cand[2] == 'upload' and c_code not in st.session_state.ignored_stocks and c_code not in existing:
-                    # [修正 3] 遞補時也傳入選項
                     data = fetch_stock_data_raw(c_code, cand[1], cand[3], include_3d_hl=include_3d_hl)
                     if data:
                         data.update({'_source': 'upload', '_order': cand[3], '_source_rank': 1})
@@ -958,10 +947,15 @@ with tab2:
         if calc_price != st.session_state.calc_base_price:
             st.session_state.calc_base_price = calc_price
             st.session_state.calc_view_price = apply_tick_rules(calc_price)
-    with c2: shares = st.number_input("股數", 1000, step=1000)
-    with c3: discount = st.number_input("手續費折扣 (折)", 2.8, step=0.1)
-    with c4: min_fee = st.number_input("最低手續費 (元)", 20, step=1)
-    with c5: tick_count = st.number_input("顯示檔數 (檔)", 5, 1, 50)
+    with c2: 
+        shares = st.number_input("股數", value=1000, step=1000)
+    with c3: 
+        discount = st.number_input("手續費折扣 (折)", value=2.8, step=0.1)
+    with c4: 
+        min_fee = st.number_input("最低手續費 (元)", value=20, step=1)
+    with c5: 
+        # [修正] 使用關鍵字參數確保 min/max/value 順序正確
+        tick_count = st.number_input("顯示檔數 (檔)", min_value=1, max_value=50, value=5, step=1)
     
     direction = st.radio("交易方向", ["當沖多 (先買後賣)", "當沖空 (先賣後買)"], horizontal=True)
     l_up, l_down = calculate_limits(st.session_state.calc_base_price)
